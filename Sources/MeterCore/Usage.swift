@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 public struct Usage: Decodable {
     public let rateLimits: Bucket?
@@ -8,6 +9,17 @@ public struct Usage: Decodable {
     public var remaining: Int? { core?.windows.map(\.remaining).min() }
     public var additionalBuckets: [(String, Bucket)] {
         (rateLimitsByLimitId ?? [:]).filter { $0.key != "codex" }.sorted { $0.key < $1.key }
+    }
+    /// The soonest reset across every allowance currently reported.
+    public var nearestReset: Window? {
+        let windows = (core?.windows ?? []) + additionalBuckets.flatMap { $0.1.windows }
+        return windows.compactMap { window -> (Window, Double)? in
+            guard let reset = window.resetsAt else { return nil }
+            return (window, reset)
+        }.min { $0.1 < $1.1 }?.0
+    }
+    public func resetSummary(now: Date = Date()) -> String? {
+        nearestReset?.resetText(now: now)
     }
     public static func decode(_ data: Data) throws -> Usage {
         let result = try JSONDecoder().decode(Usage.self, from: data)
@@ -52,7 +64,7 @@ public struct Credits: Decodable {
 public struct ResetCredits: Decodable { public let availableCount: Int? }
 
 public enum MeterError: Error, LocalizedError {
-    case missingCLI, login, unsupported, timeout, disconnected, malformed, service
+    case missingCLI, login, unsupported, timeout, disconnected, malformed, service, launch
     public var errorDescription: String? {
         switch self {
         case .missingCLI: return "Install Codex CLI, or choose its executable below."
@@ -62,6 +74,7 @@ public enum MeterError: Error, LocalizedError {
         case .disconnected: return "The Codex connection closed. Refresh to reconnect."
         case .malformed: return "Codex returned an unreadable usage response. Try updating Codex CLI."
         case .service: return "Usage could not be fetched. Check your connection and Codex login, then refresh."
+        case .launch: return "Codex CLI could not start. Check the selected executable, then try again."
         }
     }
 }
@@ -73,11 +86,12 @@ public enum CLILocator {
     }
 }
 
-@MainActor public final class UsageState {
-    public private(set) var usage: Usage?
-    public private(set) var lastSuccess: Date?
-    public private(set) var error: String?
-    public private(set) var refreshing = false
+@MainActor public final class UsageState: ObservableObject {
+    @Published public private(set) var usage: Usage?
+    @Published public private(set) var lastSuccess: Date?
+    @Published public private(set) var error: String?
+    @Published public private(set) var failure: MeterError?
+    @Published public private(set) var refreshing = false
     public init() {}
     public var title: String {
         let value = usage?.remaining.map { "\($0)%" } ?? "—"
@@ -89,7 +103,11 @@ public enum CLILocator {
         return true
     }
     public func succeed(_ value: Usage, now: Date = Date()) {
-        usage = value; lastSuccess = now; error = nil; refreshing = false
+        usage = value; lastSuccess = now; error = nil; failure = nil; refreshing = false
     }
-    public func fail(_ failure: Error) { error = failure.localizedDescription; refreshing = false }
+    public func fail(_ failure: Error) {
+        self.failure = failure as? MeterError
+        error = failure.localizedDescription
+        refreshing = false
+    }
 }

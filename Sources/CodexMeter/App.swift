@@ -8,44 +8,130 @@ import Combine
     let state = UsageState()
     @Published var loginEnabled = SMAppService.mainApp.status == .enabled
     @Published var preferenceError: String?
+    @Published var closeOnOutsideClick: Bool {
+        didSet { UserDefaults.standard.set(closeOnOutsideClick, forKey: "closeOnOutsideClick") }
+    }
+    /// When the current fetch failed, the moment the automatic retry is scheduled.
+    @Published private(set) var retryAt: Date?
+    @Published private(set) var loginCommandCopied = false
+
     private var client: RPCClient?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
+    private var cancellables = Set<AnyCancellable>()
     private var refreshTask: Task<Void, Never>?
+    private var consecutiveFailures = 0
+    private var lastAttempt = Date.distantPast
     private var stopping = false
+    private var popoverIsOpen = false
+    private var copiedResetTask: Task<Void, Never>?
+
+    /// Background cadence once a refresh has succeeded. Kept short so the menu
+    /// bar figure stays close to the value shown in Codex itself.
+    private let idleInterval: TimeInterval = 60
+    /// Faster cadence while the popover is open, so the panel feels live.
+    private let openInterval: TimeInterval = 20
+
     init() {
-        timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        closeOnOutsideClick = UserDefaults.standard.object(forKey: "closeOnOutsideClick") as? Bool ?? true
+        // UsageState owns the snapshot; forward its changes so SwiftUI observes
+        // the model as a single object.
+        state.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        observeEnvironment()
+        refresh()
+    }
+
+    private func observeEnvironment() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            observers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.refresh() }
+            })
         }
-        observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        })
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.stop() }
         })
-        refresh()
     }
-    func refresh() {
-        guard !stopping, state.begin() else { return }
-        objectWillChange.send()
+
+    // MARK: - Refreshing
+
+    func refresh(force: Bool = false) {
+        guard !stopping else { return }
+        // Ignore accidental duplicate triggers (wake + popover opening together).
+        if !force, Date().timeIntervalSince(lastAttempt) < 2 { return }
+        guard state.begin() else { return }
+        lastAttempt = Date()
+        retryAt = nil
+        timer?.invalidate()
+        timer = nil
+
         if client == nil {
             client = RPCClient {
                 guard let executable = CLILocator.locate(custom: UserDefaults.standard.string(forKey: "codexPath")) else { throw MeterError.missingCLI }
                 return ProcessTransport(executable: executable)
             }
         }
-        refreshTask = Task {
+        let client = client!
+        refreshTask = Task { [weak self] in
             do {
-                let usage = try await client!.readUsage()
-                guard !stopping else { return }
-                state.succeed(usage)
+                let usage = try await client.readUsage()
+                guard let self, !self.stopping else { return }
+                self.consecutiveFailures = 0
+                self.state.succeed(usage)
+                self.scheduleNext(after: self.popoverIsOpen ? self.openInterval : self.idleInterval)
             } catch {
-                guard !stopping else { return }
-                state.fail(error)
+                guard let self, !self.stopping else { return }
+                self.consecutiveFailures += 1
+                self.state.fail(error)
+                let delay = self.retryDelay(for: error)
+                self.retryAt = Date().addingTimeInterval(delay)
+                self.scheduleNext(after: delay)
             }
-            objectWillChange.send()
         }
     }
+
+    private func retryDelay(for error: Error) -> TimeInterval {
+        switch error as? MeterError {
+        case .missingCLI:
+            // The CLI is not installed yet; check occasionally so a fresh
+            // install is picked up without a manual refresh.
+            return 60
+        case .login, .unsupported:
+            return 120
+        default:
+            // 5s, 10s, 20s, 40s … capped at one minute.
+            return min(60, 5 * pow(2, Double(max(0, consecutiveFailures - 1))))
+        }
+    }
+
+    private func scheduleNext(after delay: TimeInterval) {
+        timer?.invalidate()
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        timer.tolerance = min(2, delay * 0.1)
+        // `.common` keeps the timer alive while the popover or a menu is open.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func popoverDidShow() {
+        popoverIsOpen = true
+        refresh(force: true)
+    }
+
+    func popoverDidClose() {
+        popoverIsOpen = false
+        if state.error == nil {
+            scheduleNext(after: idleInterval)
+        }
+    }
+
+    // MARK: - Preferences
+
     func chooseCLI() {
         let panel = NSOpenPanel()
         panel.title = "Choose Codex CLI executable"
@@ -62,13 +148,28 @@ import Combine
         UserDefaults.standard.set(url.path, forKey: "codexPath")
         preferenceError = nil
         client?.shutdown(); client = nil
-        refresh()
+        refresh(force: true)
     }
+
     func useAutomaticCLI() {
         UserDefaults.standard.removeObject(forKey: "codexPath")
         client?.shutdown(); client = nil
-        refresh()
+        refresh(force: true)
     }
+
+    func copyLoginCommand() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString("codex login", forType: .string)
+        loginCommandCopied = true
+        copiedResetTask?.cancel()
+        copiedResetTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.loginCommandCopied = false
+        }
+    }
+
     func setLogin(_ enabled: Bool) {
         do {
             if enabled { try SMAppService.mainApp.register() }
@@ -80,9 +181,12 @@ import Combine
             preferenceError = "Could not change Launch at Login. Move the app to Applications and try again."
         }
     }
+
     func stop() {
         stopping = true
         timer?.invalidate()
+        timer = nil
+        copiedResetTask?.cancel()
         refreshTask?.cancel()
         client?.shutdown()
     }
@@ -111,15 +215,19 @@ import Combine
     }
 }
 
-@MainActor final class StatusController: NSObject {
+@MainActor final class StatusController: NSObject, NSPopoverDelegate {
     private let model = MeterModel()
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
     private var subscription: AnyCancellable?
+    private var monitors: [Any] = []
+    private var observers: [NSObjectProtocol] = []
 
     override init() {
         super.init()
-        popover.behavior = .transient
+        popover.behavior = .applicationDefined
+        popover.animates = true
+        popover.delegate = self
         let content = NSHostingController(rootView: MeterView(model: model))
         content.sizingOptions = [.preferredContentSize]
         popover.contentViewController = content
@@ -131,25 +239,97 @@ import Combine
             button.action = #selector(togglePopover)
             button.setAccessibilityLabel("Codex usage")
         }
+        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.closeForOutsideClick() }
+        })
+        installEventMonitors()
         update()
         subscription = model.objectWillChange.sink { [weak self] _ in
             Task { @MainActor in self?.update() }
         }
     }
 
+    // MARK: - Menu bar
+
     private func update() {
-        let percentage = model.state.usage?.remaining.map { "\($0)%" } ?? "—"
-        item.button?.title = " " + percentage + (model.state.error != nil ? " ·" : "")
-        item.button?.toolTip = model.state.error ?? "Codex: \(percentage) remaining"
+        let state = model.state
+        let percentage = state.usage?.remaining.map { "\($0)%" } ?? "—"
+        let stale = state.error != nil && state.usage != nil
+        item.button?.title = " " + percentage + (stale ? " ·" : "")
+
+        if let error = state.error, state.usage != nil {
+            item.button?.toolTip = "Codex: \(percentage) remaining, showing last known usage.\n\(error)"
+        } else if let reset = state.usage?.resetSummary() {
+            item.button?.toolTip = "Codex: \(percentage) remaining\n\(reset)"
+        } else if let error = state.error {
+            item.button?.toolTip = "Codex usage unavailable.\n\(error)"
+        } else {
+            item.button?.toolTip = state.refreshing ? "Codex: connecting…" : "Codex usage"
+        }
     }
+
     @objc private func togglePopover() {
         guard let button = item.button else { return }
-        if popover.isShown { popover.performClose(nil) }
-        else {
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
-    func stop() { model.stop() }
+
+    func stop() {
+        removeEventMonitors()
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
+        model.stop()
+    }
+
+    // MARK: - Popover dismissal
+    //
+    // `NSPopover.behavior = .transient` relies on window-server heuristics that
+    // behave differently across Macs and input devices. Dismiss explicitly on
+    // outside clicks / app deactivation/escape so every Mac behaves the same.
+
+    private func installEventMonitors() {
+        let mouseMask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        // Only global events are observed for the mouse: clicks inside the
+        // popover (including its menus) belong to this app and must be left
+        // alone. Clicks anywhere else land in another app or the Finder.
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: mouseMask, handler: { [weak self] _ in
+            Task { @MainActor in self?.closeForOutsideClick() }
+        }) {
+            monitors.append(global)
+        }
+        if let keys = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] event in
+            guard event.keyCode == 53 else { return event } // Escape
+            var handled = false
+            MainActor.assumeIsolated {
+                guard let self, self.popover.isShown,
+                      event.window === self.popover.contentViewController?.view.window else { return }
+                self.popover.performClose(nil)
+                handled = true
+            }
+            return handled ? nil : event
+        }) {
+            monitors.append(keys)
+        }
+    }
+
+    private func closeForOutsideClick() {
+        guard popover.isShown, model.closeOnOutsideClick else { return }
+        popover.performClose(nil)
+    }
+
+    private func removeEventMonitors() {
+        monitors.forEach { NSEvent.removeMonitor($0) }
+        monitors.removeAll()
+    }
+
+    // MARK: - NSPopoverDelegate
+
+    func popoverDidShow(_ notification: Notification) { model.popoverDidShow() }
+    func popoverDidClose(_ notification: Notification) { model.popoverDidClose() }
 
     // A drawn template image stays visible independently of SwiftUI text rendering.
     private static func makeIcon() -> NSImage {
@@ -172,122 +352,5 @@ import Combine
         }
         image.isTemplate = true
         return image
-    }
-}
-
-struct MeterView: View {
-    @ObservedObject var model: MeterModel
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 60)) { context in
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Usage").font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    Text("Remaining").font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-
-                if let usage = model.state.usage {
-                    if let core = usage.core {
-                        Text("Codex").font(.system(size: 12, weight: .semibold))
-                        bucket(core, now: context.date)
-                    } else {
-                        Text("Usage unavailable").font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let count = usage.rateLimitResetCredits?.availableCount {
-                        detail("Earned resets", value: "\(count)")
-                    }
-                    ForEach(usage.additionalBuckets, id: \.0) { key, value in
-                        Divider()
-                        Text(value.limitName ?? key)
-                            .font(.system(size: 12, weight: .semibold))
-                        bucket(value, now: context.date)
-                    }
-                } else if model.state.error == nil {
-                    Text("Loading usage…").font(.caption).foregroundStyle(.secondary)
-                }
-
-                if let error = model.state.error {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if model.state.usage != nil {
-                            Label("Usage may be out of date", systemImage: "exclamationmark.triangle")
-                                .font(.caption.weight(.medium))
-                        }
-                        Text(error).font(.caption).textSelection(.enabled)
-                    }.foregroundStyle(.orange)
-                }
-                if let error = model.preferenceError {
-                    Text(error).font(.caption).foregroundStyle(.orange)
-                }
-
-                Divider()
-                HStack(spacing: 14) {
-                    if let last = model.state.lastSuccess {
-                        Text("Updated \(last.formatted(date: .omitted, time: .shortened))")
-                            .font(.system(size: 10)).foregroundStyle(.tertiary)
-                    }
-                    Spacer(minLength: 0)
-                    Button(action: model.refresh) {
-                        Image(systemName: "arrow.clockwise")
-                            .foregroundStyle(model.state.refreshing ? .tertiary : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(model.state.refreshing)
-                    .help(model.state.refreshing ? "Refreshing…" : "Refresh usage")
-                    .accessibilityLabel("Refresh usage")
-
-                    Menu {
-                        Toggle("Launch at Login", isOn: Binding(get: { model.loginEnabled }, set: model.setLogin))
-                        Menu("Codex CLI") {
-                            Button("Choose Executable…", action: model.chooseCLI)
-                            Button("Detect Automatically", action: model.useAutomaticCLI)
-                            Divider()
-                            Link("Installation and Sign-in Guide", destination: URL(string: "https://developers.openai.com/codex/cli")!)
-                        }.disabled(model.state.refreshing)
-                        Divider()
-                        Button("Quit Codex Meter") { model.stop(); NSApp.terminate(nil) }
-                            .keyboardShortcut("q")
-                    } label: {
-                        Image(systemName: "gearshape").foregroundStyle(.secondary)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("Settings")
-                    .accessibilityLabel("Settings")
-                }.font(.system(size: 12))
-            }
-            .padding(16)
-            .frame(width: 300)
-        }
-    }
-
-    private func detail(_ title: String, value: String) -> some View {
-        HStack {
-            Text(title).foregroundStyle(.secondary)
-            Spacer()
-            Text(value).monospacedDigit()
-        }.font(.system(size: 11))
-    }
-
-    @ViewBuilder private func bucket(_ value: Bucket, now: Date) -> some View {
-        ForEach(Array(value.windows.enumerated()), id: \.offset) { _, window in
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(window.label)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("\(window.remaining)%")
-                    .font(.system(size: 13, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(window.remaining <= 10 ? Color.orange : Color.primary)
-            }
-            .help(window.resetText(now: now))
-            .accessibilityValue("\(window.remaining)% remaining. \(window.resetText(now: now))")
-        }
-        if value.windows.isEmpty {
-            Text("Allowance unavailable").font(.caption).foregroundStyle(.secondary)
-        }
-        if let credits = value.credits { detail("Credits", value: credits.display) }
     }
 }

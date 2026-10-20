@@ -1,6 +1,6 @@
 # Codex Meter
 
-A small native macOS menu bar app for your existing Codex account. The menu bar shows a native terminal icon and the **lowest remaining percentage** across the core Codex allowance windows. Click it for individual allowances, credit information, and refresh controls. Hover over an allowance row for its reset countdown.
+A small native macOS menu bar app for your existing Codex account. The menu bar shows a native terminal icon and the **lowest remaining percentage** across the core Codex allowance windows. Click it for a compact usage panel with a progress ring, per-window allowance bars, reset countdowns, credit information, and refresh controls. The panel closes on an outside click (configurable) or Escape, and behaves the same on every Mac.
 
 ## Requirements
 
@@ -27,11 +27,13 @@ The app runs one `codex app-server` subprocess and uses its [documented account 
 
 Authentication is handled by Codex using its existing local login. The app does not read credential files or copy tokens. Current usage still requires internet access. Desktop-app login alone does not guarantee the CLI has a usable login.
 
-Usage refreshes on startup, every five minutes, on wake, and when you click the refresh icon. There is a 20-second timeout per request and at most two reconnect retries after a timeout or closed connection. Requests never overlap. After failure, the last successful values stay visible with a warning and the time of their last update. A passed reset time does not imply that an allowance has replenished; refresh confirms it.
+Usage refreshes on startup, every minute in the background, every 20 seconds while the panel is open, on wake, on session reactivation, when the panel opens, and when you click the refresh icon. A failed request schedules an automatic retry (5, 10, 20, 40, then 60-second backoff; 60 seconds for a missing CLI and 2 minutes for sign-in or version problems), so a slow login or a not-yet-installed CLI recovers without a manual refresh. There is a 20-second timeout per request and at most two reconnect retries after a timeout or closed connection. Requests never overlap. After failure, the last successful values stay visible with a warning and the time of their last update. A passed reset time does not imply that an allowance has replenished; refresh confirms it.
 
-The main percentage uses `rateLimitsByLimitId.codex`, falling back to `rateLimits`. All returned allowance buckets appear directly in the dropdown, without a disclosure section. Labels derive from window durations. Remaining percentages are rounded down and clamped to 0–100. Purchased/workspace credits and earned reset counts are separate from allowances; absent fields are unavailable, not zero. No purchase or reset-redemption controls are included.
+While no usage has loaded yet, the panel shows a dedicated connecting state and, if setup is required, a plain-language explanation with **Choose CLI…**, **Copy Login Command**, and **Try Again** actions instead of a bare error string.
 
-Only the selected CLI path and the macOS login-item preference persist. Usage is held in memory. The app discards subprocess stderr and does not log tokens, account responses, or balances.
+The main percentage uses `rateLimitsByLimitId.codex`, falling back to `rateLimits`. All returned allowance buckets appear directly in the panel, without a disclosure section. Labels derive from window durations. Remaining percentages are rounded down and clamped to 0–100. Purchased/workspace credits and earned reset counts are separate from allowances; absent fields are unavailable, not zero. No purchase or reset-redemption controls are included.
+
+Only the selected CLI path, the close-on-outside-click preference, and the macOS login-item state persist. Usage is held in memory. The app discards subprocess stderr and does not log tokens, account responses, or balances.
 
 ## Troubleshooting
 

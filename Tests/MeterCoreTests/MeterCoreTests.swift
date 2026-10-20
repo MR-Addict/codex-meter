@@ -32,6 +32,12 @@ final class UsageTests {
         expectEqual(window.resetText(now: Date(timeIntervalSince1970: 6000)), "Reset due · refresh to check")
         expectEqual(try parse(#"{"rateLimits":{"primary":{"usedPercent":0}}}"#).core?.primary?.resetText(), "Reset time unavailable")
     }
+    @Test func testNearestResetAcrossWindows() throws {
+        let value = try parse(#"{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300,"resetsAt":5000},"secondary":{"usedPercent":20,"windowDurationMins":10080,"resetsAt":3000}},"rateLimitsByLimitId":{"other":{"primary":{"usedPercent":50,"resetsAt":900}}}}"#)
+        expectEqual(value.nearestReset?.resetsAt, 900)
+        expectEqual(value.resetSummary(now: Date(timeIntervalSince1970: 0)), "Resets in 15m")
+        expectNil(try parse(#"{"rateLimits":{"primary":{"usedPercent":10}}}"#).nearestReset)
+    }
     @Test func testMalformed() {
         for json in ["oops", "{}", #"{"rateLimits":{"primary":{"usedPercent":"bad"}}}"#] {
             do { _ = try parse(json); Issue.record("Expected malformed response error") } catch {}

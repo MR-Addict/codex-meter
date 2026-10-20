@@ -90,10 +90,16 @@ import Darwin
         }
         do {
             try pipe.start()
-            _ = try await request("initialize", params: ["clientInfo": ["name": "codex_meter", "title": "Codex Meter", "version": "0.1.0"]])
+            _ = try await request("initialize", params: ["clientInfo": ["name": "codex_meter", "title": "Codex Meter", "version": "0.2.0"]])
             try send(["method": "initialized", "params": [:]])
             ready = true
-        } catch { disconnect(error); throw error }
+        } catch let error as MeterError {
+            disconnect(error); throw error
+        } catch {
+            // The executable exists but could not be launched (arch, quarantine,
+            // permissions, or a just-removed install).
+            disconnect(MeterError.launch); throw MeterError.launch
+        }
     }
     public func readUsage() async throws -> Usage {
         for attempt in 0..<3 {
