@@ -59,13 +59,14 @@ import Darwin
     private var buffer = Data()
     private var nextID = 0
     private var ready = false
+    private var stopped = false
     private var generation = UUID()
     private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
     private var deadlines: [Int: Task<Void, Never>] = [:]
     public init(timeout: TimeInterval = 20, factory: @escaping () throws -> RPCTransport) {
         self.timeout = timeout; self.factory = factory
     }
-    public func shutdown() { disconnect(MeterError.disconnected) }
+    public func shutdown() { stopped = true; disconnect(CancellationError()) }
     private func disconnect(_ error: Error) {
         generation = UUID(); ready = false
         let old = transport; transport = nil
@@ -76,6 +77,7 @@ import Darwin
         requests.values.forEach { $0.resume(throwing: error) }
     }
     private func connect() async throws {
+        try checkActive()
         guard !ready else { return }
         let pipe = try factory()
         transport = pipe
@@ -93,6 +95,8 @@ import Darwin
             _ = try await request("initialize", params: ["clientInfo": ["name": "codex_meter", "title": "Codex Meter", "version": "0.2.0"]])
             try send(["method": "initialized", "params": [:]])
             ready = true
+        } catch is CancellationError {
+            disconnect(CancellationError()); throw CancellationError()
         } catch let error as MeterError {
             disconnect(error); throw error
         } catch {
@@ -103,8 +107,10 @@ import Darwin
     }
     public func readUsage() async throws -> Usage {
         for attempt in 0..<3 {
+            try checkActive()
             do {
                 try await connect()
+                try checkActive()
                 let accountData = try await request("account/read", params: ["refreshToken": false])
                 let account = try JSONSerialization.jsonObject(with: accountData) as? [String: Any]
                 guard let details = account?["account"] as? [String: Any], details["type"] as? String == "chatgpt" else {
@@ -122,9 +128,14 @@ import Darwin
                 default: break
                 }
                 throw error
-            } catch { throw MeterError.malformed }
+            } catch is CancellationError { throw CancellationError() }
+            catch { throw MeterError.malformed }
         }
         throw MeterError.disconnected
+    }
+    private func checkActive() throws {
+        try Task.checkCancellation()
+        if stopped { throw CancellationError() }
     }
     private func send(_ message: [String: Any]) throws {
         guard let transport else { throw MeterError.disconnected }
@@ -133,6 +144,7 @@ import Darwin
         do { try transport.write(data) } catch { throw MeterError.disconnected }
     }
     private func request(_ method: String, params: [String: Any]) async throws -> Data {
+        try checkActive()
         nextID += 1
         let id = nextID
         return try await withCheckedThrowingContinuation { continuation in

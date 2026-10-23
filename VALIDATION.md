@@ -1,3 +1,19 @@
+# 0.2.0 audit status — 2026-10-23
+
+Baseline: aeba40ded5a6bb6c43948b47f4d68483fc2e14f1.
+See [REVIEW-0.2.0.md](REVIEW-0.2.0.md) for findings, regression definitions and the pending macOS acceptance matrix.
+
+- Source review and regression additions completed locally.
+- `git diff --check`: passed.
+- New Swift tests/build: NOT RUN successfully (Linux host lacks Swift/xcrun; test script exits 127).
+- 25 test definitions now exist, including one opt-in live test; this is not a passing-test count.
+- New macOS CI workflow prepared, not triggered.
+- AppKit events, sleep/wake, login registration, live account, signatures and architecture compatibility: NOT VERIFIED for 0.2.0.
+
+The following record is historical and does not validate the October UI/refresh changes.
+
+---
+
 # Validation — 2026-09-16
 
 Environment: Apple Silicon, macOS 26.6.2, Swift 6.4 Command Line Tools, Codex CLI 0.154.0.

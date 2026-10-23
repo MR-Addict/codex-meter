@@ -1,0 +1,10 @@
+name: macOS regression
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/test.sh
+      - run: ./scripts/build.sh

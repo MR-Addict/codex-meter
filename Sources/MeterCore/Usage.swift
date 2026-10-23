@@ -102,6 +102,7 @@ public enum CLILocator {
         refreshing = true
         return true
     }
+    public func cancelRefresh() { refreshing = false }
     public func succeed(_ value: Usage, now: Date = Date()) {
         usage = value; lastSuccess = now; error = nil; failure = nil; refreshing = false
     }

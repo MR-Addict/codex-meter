@@ -16,12 +16,17 @@ import Combine
     @Published private(set) var loginCommandCopied = false
 
     private var client: RPCClient?
+    private let makeClient: @MainActor () -> RPCClient
+    private let testScheduler: ((TimeInterval, @escaping @MainActor () -> Void) -> Void)?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var cancellables = Set<AnyCancellable>()
     private var refreshTask: Task<Void, Never>?
     private var consecutiveFailures = 0
-    private var lastAttempt = Date.distantPast
+    private var lastAttempt = -Double.infinity
+    private var lastResume = -Double.infinity
+    private var refreshGeneration = UUID()
+    private var timerGeneration = UUID()
     private var stopping = false
     private var popoverIsOpen = false
     private var copiedResetTask: Task<Void, Never>?
@@ -32,15 +37,26 @@ import Combine
     /// Faster cadence while the popover is open, so the panel feels live.
     private let openInterval: TimeInterval = 20
 
-    init() {
+    init(startAutomatically: Bool = true,
+         makeClient: @escaping @MainActor () -> RPCClient = {
+             RPCClient {
+                 guard let executable = CLILocator.locate(custom: UserDefaults.standard.string(forKey: "codexPath")) else { throw MeterError.missingCLI }
+                 return ProcessTransport(executable: executable)
+             }
+         },
+         scheduler: ((TimeInterval, @escaping @MainActor () -> Void) -> Void)? = nil) {
+        self.makeClient = makeClient
+        self.testScheduler = scheduler
         closeOnOutsideClick = UserDefaults.standard.object(forKey: "closeOnOutsideClick") as? Bool ?? true
         // UsageState owns the snapshot; forward its changes so SwiftUI observes
         // the model as a single object.
         state.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
-        observeEnvironment()
-        refresh()
+        if startAutomatically {
+            observeEnvironment()
+            refresh()
+        }
     }
 
     private func observeEnvironment() {
@@ -48,9 +64,15 @@ import Combine
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
                      NSWorkspace.sessionDidBecomeActiveNotification] {
             observers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.refresh() }
+                Task { @MainActor in
+                    self?.resumeEnvironment()
+                    self?.syncLoginStatus()
+                }
             })
         }
+        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.syncLoginStatus() }
+        })
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.stop() }
         })
@@ -61,56 +83,70 @@ import Combine
     func refresh(force: Bool = false) {
         guard !stopping else { return }
         // Ignore accidental duplicate triggers (wake + popover opening together).
-        if !force, Date().timeIntervalSince(lastAttempt) < 2 { return }
+        if !force, ProcessInfo.processInfo.systemUptime - lastAttempt < 2 { return }
         guard state.begin() else { return }
-        lastAttempt = Date()
+        lastAttempt = ProcessInfo.processInfo.systemUptime
         retryAt = nil
+        timerGeneration = UUID()
         timer?.invalidate()
         timer = nil
 
-        if client == nil {
-            client = RPCClient {
-                guard let executable = CLILocator.locate(custom: UserDefaults.standard.string(forKey: "codexPath")) else { throw MeterError.missingCLI }
-                return ProcessTransport(executable: executable)
-            }
-        }
+        if client == nil { client = makeClient() }
         let client = client!
+        let generation = refreshGeneration
         refreshTask = Task { [weak self] in
             do {
                 let usage = try await client.readUsage()
-                guard let self, !self.stopping else { return }
+                guard let self, !self.stopping, self.refreshGeneration == generation else { return }
                 self.consecutiveFailures = 0
                 self.state.succeed(usage)
                 self.scheduleNext(after: self.popoverIsOpen ? self.openInterval : self.idleInterval)
             } catch {
-                guard let self, !self.stopping else { return }
+                guard let self, !self.stopping, self.refreshGeneration == generation else { return }
                 self.consecutiveFailures += 1
                 self.state.fail(error)
-                let delay = self.retryDelay(for: error)
+                let delay = RefreshPolicy.retryDelay(error: error, failures: self.consecutiveFailures)
                 self.retryAt = Date().addingTimeInterval(delay)
                 self.scheduleNext(after: delay)
             }
         }
     }
 
-    private func retryDelay(for error: Error) -> TimeInterval {
-        switch error as? MeterError {
-        case .missingCLI:
-            // The CLI is not installed yet; check occasionally so a fresh
-            // install is picked up without a manual refresh.
-            return 60
-        case .login, .unsupported:
-            return 120
-        default:
-            // 5s, 10s, 20s, 40s … capped at one minute.
-            return min(60, 5 * pow(2, Double(max(0, consecutiveFailures - 1))))
-        }
+    private func replaceClient() {
+        refreshGeneration = UUID()
+        refreshTask?.cancel()
+        client?.shutdown()
+        client = nil
+        state.cancelRefresh()
+        consecutiveFailures = 0
+        refresh(force: true)
+    }
+
+    func resumeEnvironment() {
+        guard !stopping else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastResume >= 2 else { return }
+        lastResume = now
+        // Discard pre-sleep work and its transport; never await its timeout.
+        replaceClient()
+    }
+
+    private func syncLoginStatus() {
+        loginEnabled = SMAppService.mainApp.status == .enabled
     }
 
     private func scheduleNext(after delay: TimeInterval) {
+        guard !stopping, !state.refreshing else { return }
         timer?.invalidate()
-        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        let generation = UUID()
+        timerGeneration = generation
+        let fire: @MainActor () -> Void = { [weak self] in
+            guard let self, self.timerGeneration == generation, !self.stopping else { return }
+            self.refresh(force: true)
+        }
+        if let testScheduler { testScheduler(delay, fire); return }
+        let timer = Timer(timeInterval: delay, repeats: false) { _ in
+            Task { @MainActor in fire() }
         }
         timer.tolerance = min(2, delay * 0.1)
         // `.common` keeps the timer alive while the popover or a menu is open.
@@ -120,14 +156,18 @@ import Combine
 
     func popoverDidShow() {
         popoverIsOpen = true
-        refresh(force: true)
+        refresh()
+        if !state.refreshing {
+            scheduleNext(after: RefreshPolicy.delay(open: true, lastSuccess: state.lastSuccess,
+                                                    retryAt: retryAt, now: Date()))
+        }
     }
 
     func popoverDidClose() {
         popoverIsOpen = false
-        if state.error == nil {
-            scheduleNext(after: idleInterval)
-        }
+        guard !stopping, !state.refreshing else { return }
+        scheduleNext(after: RefreshPolicy.delay(open: false, lastSuccess: state.lastSuccess,
+                                                retryAt: retryAt, now: Date()))
     }
 
     // MARK: - Preferences
@@ -147,14 +187,12 @@ import Combine
         }
         UserDefaults.standard.set(url.path, forKey: "codexPath")
         preferenceError = nil
-        client?.shutdown(); client = nil
-        refresh(force: true)
+        replaceClient()
     }
 
     func useAutomaticCLI() {
         UserDefaults.standard.removeObject(forKey: "codexPath")
-        client?.shutdown(); client = nil
-        refresh(force: true)
+        replaceClient()
     }
 
     func copyLoginCommand() {
@@ -184,6 +222,15 @@ import Combine
 
     func stop() {
         stopping = true
+        refreshGeneration = UUID()
+        timerGeneration = UUID()
+        observers.forEach {
+            NSWorkspace.shared.notificationCenter.removeObserver($0)
+            NotificationCenter.default.removeObserver($0)
+        }
+        observers.removeAll()
+        retryAt = nil
+        state.cancelRefresh()
         timer?.invalidate()
         timer = nil
         copiedResetTask?.cancel()
@@ -305,8 +352,8 @@ import Combine
             guard event.keyCode == 53 else { return event } // Escape
             var handled = false
             MainActor.assumeIsolated {
-                guard let self, self.popover.isShown,
-                      event.window === self.popover.contentViewController?.view.window else { return }
+                guard let self, PanelDismissalPolicy.escape(isShown: self.popover.isShown,
+                    isPanelWindow: event.window != nil && event.window === self.popover.contentViewController?.view.window) else { return }
                 self.popover.performClose(nil)
                 handled = true
             }
@@ -317,7 +364,7 @@ import Combine
     }
 
     private func closeForOutsideClick() {
-        guard popover.isShown, model.closeOnOutsideClick else { return }
+        guard PanelDismissalPolicy.outsideClick(isShown: popover.isShown, enabled: model.closeOnOutsideClick) else { return }
         popover.performClose(nil)
     }
 
