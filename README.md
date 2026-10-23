@@ -2,7 +2,7 @@
 
 A small macOS menu bar app for checking your Codex usage, remaining allowances, and reset times. Uses your existing Codex CLI login and refreshes automatically.
 
-<!-- Add a real app screenshot here once available: assets/screenshot.png. -->
+<img src="assets/screenshot.png" alt="Codex Meter menu bar and usage panel showing remaining allowance, reset time, and credits" width="382">
 
 ## Requirements
 
