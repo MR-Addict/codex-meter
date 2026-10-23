@@ -18,7 +18,8 @@ import MeterCore
         if let id = message["id"] as? Int { pending[method] = id }
     }
     func reply(_ method: String, _ result: [String: Any]) throws {
-        let id = try #require(pending.removeValue(forKey: method))
+        let pendingID = pending.removeValue(forKey: method)
+        let id = try #require(pendingID)
         var data = try JSONSerialization.data(withJSONObject: ["id": id, "result": result])
         data.append(10)
         onData?(data)
