@@ -70,8 +70,13 @@ import Combine
         guard let descriptor = model.activeDescriptor, let state = model.activeState else {
             button.image = icon(for: .generic)
             button.title = " —"
-            button.setAccessibilityLabel("AI Meter: no supported services detected")
-            button.toolTip = "AI Meter — No supported AI tools detected.\nClick to locate a CLI or rescan."
+            if !model.detectedServices.isEmpty {
+                button.setAccessibilityLabel("AI Meter: all services disabled")
+                button.toolTip = "AI Meter — All services are disabled.\nClick to enable a service in Settings."
+            } else {
+                button.setAccessibilityLabel("AI Meter: no supported services detected")
+                button.toolTip = "AI Meter — No supported AI tools detected.\nClick to locate a CLI or rescan."
+            }
             return
         }
 
@@ -80,7 +85,7 @@ import Combine
         button.title = " " + percentage + (state.isStale ? " ·" : "")
         button.setAccessibilityLabel("\(descriptor.name) usage: \(percentage)")
 
-        let switchHint = model.detectedServices.count > 1 ? "\nClick to view details or switch services." : ""
+        let switchHint = model.enabledServices.count > 1 ? "\nClick to view details or switch services." : ""
         if let error = state.error, state.snapshot != nil {
             button.toolTip = "\(descriptor.name): \(percentage) remaining, showing last known usage.\n\(error)"
         } else if let reset = state.snapshot?.resetSummary() {

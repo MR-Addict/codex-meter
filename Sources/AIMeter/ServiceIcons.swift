@@ -31,6 +31,10 @@ enum ServiceMenuBarIcon {
             let cgPath = antigravityPath(in: rect).cgPath
             context.addPath(cgPath)
             context.fillPath()
+        case .copilot:
+            let cgPath = copilotPath(in: rect).cgPath
+            context.addPath(cgPath)
+            context.fillPath(using: .evenOdd)
         case .generic:
             let cgPath = genericGaugePath(in: rect).cgPath
             context.addPath(cgPath)
@@ -109,6 +113,59 @@ enum ServiceMenuBarIcon {
         return path
     }
 
+    /// Minimalist aviator visor silhouette with twin vertical eyes (GitHub Copilot mark).
+    /// Drawn for even-odd fill: outer helmet + earpads, inner visor cutout, and two eye pills.
+    static func copilotPath(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 24.0
+        let ox = rect.midX - 12.0 * s
+        let oy = rect.midY - 12.0 * s
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: ox + x * s, y: oy + y * s)
+        }
+        func scaledRect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
+            CGRect(x: ox + x * s, y: oy + y * s, width: w * s, height: h * s)
+        }
+
+        var path = Path()
+        // Outer aviator helmet & earpad silhouette (clockwise, symmetrical around x = 12)
+        path.move(to: pt(12.0, 5.4))
+        path.addCurve(to: pt(16.8, 4.4), control1: pt(13.4, 4.4), control2: pt(15.2, 4.2))
+        path.addCurve(to: pt(20.4, 9.8), control1: pt(19.2, 4.7), control2: pt(20.4, 7.0))
+        // Right earpad
+        path.addCurve(to: pt(22.4, 12.0), control1: pt(21.7, 10.1), control2: pt(22.4, 10.9))
+        path.addLine(to: pt(22.4, 14.4))
+        path.addCurve(to: pt(20.3, 16.4), control1: pt(22.4, 15.6), control2: pt(21.6, 16.3))
+        // Right cheek & bottom chin
+        path.addCurve(to: pt(17.8, 19.3), control1: pt(20.0, 18.2), control2: pt(19.1, 19.3))
+        path.addLine(to: pt(6.2, 19.3))
+        path.addCurve(to: pt(3.7, 16.4), control1: pt(4.9, 19.3), control2: pt(4.0, 18.2))
+        // Left earpad
+        path.addCurve(to: pt(1.6, 14.4), control1: pt(2.4, 16.3), control2: pt(1.6, 15.6))
+        path.addLine(to: pt(1.6, 12.0))
+        path.addCurve(to: pt(3.6, 9.8), control1: pt(1.6, 10.9), control2: pt(2.3, 10.1))
+        // Left temple & left goggle brow
+        path.addCurve(to: pt(7.2, 4.4), control1: pt(3.6, 7.0), control2: pt(4.8, 4.7))
+        path.addCurve(to: pt(12.0, 5.4), control1: pt(8.8, 4.2), control2: pt(10.6, 4.4))
+        path.closeSubpath()
+
+        // Inner visor opening (cut out via even-odd fill)
+        path.addRoundedRect(
+            in: scaledRect(5.4, 9.0, 13.2, 8.0),
+            cornerSize: CGSize(width: 3.0 * s, height: 3.0 * s)
+        )
+
+        // Two vertical pill eyes inside the visor
+        path.addRoundedRect(
+            in: scaledRect(8.1, 11.0, 2.2, 4.0),
+            cornerSize: CGSize(width: 1.1 * s, height: 1.1 * s)
+        )
+        path.addRoundedRect(
+            in: scaledRect(13.7, 11.0, 2.2, 4.0),
+            cornerSize: CGSize(width: 1.1 * s, height: 1.1 * s)
+        )
+        return path
+    }
+
     /// Minimalist gauge arc + needle for the neutral 0-service state.
     static func genericGaugePath(in rect: CGRect) -> Path {
         let s = min(rect.width, rect.height) / 24.0
@@ -146,6 +203,9 @@ struct ServiceMarkView: View {
             case .antigravity:
                 let path = ServiceMenuBarIcon.antigravityPath(in: rect)
                 context.fill(path, with: .foreground)
+            case .copilot:
+                let path = ServiceMenuBarIcon.copilotPath(in: rect)
+                context.fill(path, with: .foreground, style: FillStyle(eoFill: true))
             case .generic:
                 let path = ServiceMenuBarIcon.genericGaugePath(in: rect)
                 context.stroke(
@@ -195,6 +255,8 @@ struct ServiceBadgeView: View {
             return Color(red: 0.16, green: 0.68, blue: 0.54)
         case .antigravity:
             return Color(red: 0.22, green: 0.52, blue: 0.96)
+        case .copilot:
+            return Color(red: 0.48, green: 0.36, blue: 0.94)
         case .generic:
             return Color(red: 0.42, green: 0.47, blue: 0.56)
         }
@@ -211,6 +273,12 @@ struct ServiceBadgeView: View {
         case .antigravity:
             return LinearGradient(
                 colors: [Color(red: 0.14, green: 0.54, blue: 0.96), Color(red: 0.34, green: 0.36, blue: 0.92)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .copilot:
+            return LinearGradient(
+                colors: [Color(red: 0.44, green: 0.30, blue: 0.94), Color(red: 0.24, green: 0.20, blue: 0.68)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )

@@ -35,7 +35,7 @@ struct MeterView: View {
     private func mainUsageView(now: Date) -> some View {
         header
 
-        if model.detectedServices.count > 1 {
+        if model.enabledServices.count > 1 {
             serviceSwitcher
         }
 
@@ -48,6 +48,8 @@ struct MeterView: View {
             if let error = state.error, state.snapshot != nil {
                 staleBanner(error)
             }
+        } else if !model.detectedServices.isEmpty {
+            allDisabledState
         } else {
             emptyOnboarding
         }
@@ -102,7 +104,7 @@ struct MeterView: View {
 
     private var headerSubtitle: String {
         guard let descriptor = model.activeDescriptor, let state = model.activeState else {
-            return "No services detected"
+            return model.detectedServices.isEmpty ? "No services detected" : "All services disabled"
         }
         if let failure = state.failure {
             return failure.category.headerSubtitle
@@ -116,10 +118,10 @@ struct MeterView: View {
         return "Connecting…"
     }
 
-    // MARK: - Service Switcher (only shown when 2+ services detected)
+    // MARK: - Service Switcher (only shown when 2+ enabled services detected)
 
     private var serviceSwitcher: some View {
-        let services = model.detectedServices
+        let services = model.enabledServices
         return Group {
             if services.count <= 3 {
                 HStack(spacing: 3) {
@@ -196,7 +198,7 @@ struct MeterView: View {
 
             if !collapsibleSections.isEmpty {
                 collapsibleGroupsCard(
-                    title: snapshot.serviceID == .codex ? "Other allowances" : "Other models",
+                    title: collapsibleGroupTitle(for: snapshot.serviceID),
                     sections: collapsibleSections,
                     now: now
                 )
@@ -205,6 +207,17 @@ struct MeterView: View {
             if !snapshot.badges.isEmpty {
                 badgesRow(snapshot.badges)
             }
+        }
+    }
+
+    private func collapsibleGroupTitle(for serviceID: ServiceID) -> String {
+        switch serviceID {
+        case .antigravity:
+            return "Other models"
+        case .copilot:
+            return "Included features"
+        default:
+            return "Other allowances"
         }
     }
 
@@ -521,24 +534,34 @@ struct MeterView: View {
 
     private func settingsServiceRow(_ service: DetectedService) -> some View {
         let isDetected = service.isDetected
-        let sourceText = model.displaySource(for: service.id) ?? "Not found · \(service.descriptor.requirementLabel)"
+        let isEnabled = model.isServiceEnabled(service.id)
+        let statusColor: Color = !isEnabled
+            ? Color.secondary.opacity(0.35)
+            : (isDetected ? Color(red: 0.13, green: 0.68, blue: 0.43) : Color.secondary.opacity(0.45))
+        let statusLabel: String = !isEnabled
+            ? "Disabled"
+            : (isDetected ? "Ready" : "Not found")
+        let sourceText: String = !isEnabled
+            ? (model.displaySource(for: service.id) ?? "Disabled in Settings")
+            : (model.displaySource(for: service.id) ?? "Not found · \(service.descriptor.requirementLabel)")
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 ServiceBadgeView(kind: service.descriptor.iconKind, size: 22)
+                    .opacity(isEnabled ? 1 : 0.45)
 
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
                         Text(service.descriptor.name)
                             .font(.system(size: 11.5, weight: .semibold))
-                        Spacer(minLength: 4)
-                        HStack(spacing: 4) {
+                            .foregroundStyle(isEnabled ? .primary : .secondary)
+                        HStack(spacing: 3.5) {
                             Circle()
-                                .fill(isDetected ? Color(red: 0.13, green: 0.68, blue: 0.43) : Color.secondary.opacity(0.45))
-                                .frame(width: 5.5, height: 5.5)
-                            Text(isDetected ? "Ready" : "Not found")
+                                .fill(statusColor)
+                                .frame(width: 5, height: 5)
+                            Text(statusLabel)
                                 .font(.system(size: 9.5, weight: .medium))
-                                .foregroundStyle(isDetected ? .secondary : .tertiary)
+                                .foregroundStyle(isEnabled && isDetected ? .secondary : .tertiary)
                         }
                     }
                     Text(sourceText)
@@ -547,6 +570,18 @@ struct MeterView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+
+                Spacer(minLength: 4)
+
+                Toggle("", isOn: Binding(
+                    get: { model.isServiceEnabled(service.id) },
+                    set: { model.setServiceEnabled(service.id, enabled: $0) }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .help(isEnabled ? "Disable \(service.descriptor.name)" : "Enable \(service.descriptor.name)")
+                .accessibilityLabel("Enable \(service.descriptor.name)")
             }
 
             HStack(spacing: 6) {
@@ -604,6 +639,61 @@ struct MeterView: View {
                 )
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - All-Disabled State
+
+    private var allDisabledState: some View {
+        VStack(spacing: 11) {
+            ZStack {
+                Circle()
+                    .fill(activeAccent.opacity(0.12))
+                    .frame(width: 40, height: 40)
+                Image(systemName: "pause.circle")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(activeAccent)
+            }
+
+            VStack(spacing: 3) {
+                Text("All services disabled")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Turn on any service below to resume monitoring usage.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(spacing: 6) {
+                ForEach(model.detectedServices) { service in
+                    HStack(spacing: 8) {
+                        ServiceBadgeView(kind: service.descriptor.iconKind, size: 22)
+                            .opacity(0.6)
+                        Text(service.descriptor.name)
+                            .font(.system(size: 11.5, weight: .semibold))
+                        Spacer(minLength: 4)
+                        Toggle("", isOn: Binding(
+                            get: { model.isServiceEnabled(service.id) },
+                            set: { model.setServiceEnabled(service.id, enabled: $0) }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .accessibilityLabel("Enable \(service.descriptor.name)")
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.primary.opacity(0.045))
+                    )
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 15)
+        .padding(.horizontal, 13)
+        .background(cardBackground)
     }
 
     // MARK: - 0-Service Onboarding State
@@ -801,6 +891,10 @@ struct MeterView: View {
                     Spacer(minLength: 0)
                     Label("Auto-refresh", systemImage: "arrow.triangle.2.circlepath")
                         .help("Refreshes the active service every 60 seconds, and every 20 seconds while open.")
+                } else if !model.detectedServices.isEmpty {
+                    Text("All services disabled")
+                    Spacer(minLength: 0)
+                    Text("Enable in Settings")
                 } else {
                     Text("0 services detected")
                     Spacer(minLength: 0)

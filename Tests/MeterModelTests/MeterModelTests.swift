@@ -277,6 +277,93 @@ struct MeterModelTests {
         #expect(model.activeState?.snapshot?.remainingPercent == 74)
         #expect(scheduled.last?.0 == 60)
     }
+
+    @Test @MainActor func threeServicesCoexistAndSwitchToCopilot() async throws {
+        let codex = ControlledProvider(descriptor: .codex, detected: true)
+        let agy = ControlledProvider(descriptor: .antigravity, detected: true)
+        let copilot = ControlledProvider(descriptor: .copilot, detected: true)
+        var scheduled: [(TimeInterval, @MainActor () -> Void)] = []
+        let defaults = makeIsolatedDefaults()
+        let model = MeterModel(
+            registry: ServiceRegistry(providers: [codex, agy, copilot]),
+            defaults: defaults,
+            startAutomatically: false,
+            scheduler: { scheduled.append(($0, $1)) }
+        )
+        defer { model.stop() }
+
+        #expect(model.detectedServices.map(\.id) == [.codex, .antigravity, .copilot])
+        #expect(model.activeServiceID == .codex)
+
+        model.selectService(.copilot)
+        #expect(model.activeServiceID == .copilot)
+        #expect(defaults.string(forKey: "activeServiceID") == "copilot")
+        try await waitUntil { copilot.fetchCount == 1 }
+        copilot.resolveNext(remaining: 82)
+        try await waitUntil { model.state(for: .copilot)?.refreshing == false }
+        #expect(model.activeState?.title == "Copilot 82%")
+        #expect(scheduled.last?.0 == 60)
+    }
+
+    @Test @MainActor func togglingServicesPersistsStateSwitchesActiveAndHandlesAllDisabled() async throws {
+        let codex = ControlledProvider(descriptor: .codex, detected: true)
+        let agy = ControlledProvider(descriptor: .antigravity, detected: true)
+        let copilot = ControlledProvider(descriptor: .copilot, detected: true)
+        let defaults = makeIsolatedDefaults()
+        let model = MeterModel(
+            registry: ServiceRegistry(providers: [codex, agy, copilot]),
+            defaults: defaults,
+            startAutomatically: false,
+            scheduler: { _, _ in }
+        )
+        defer { model.stop() }
+
+        #expect(model.enabledServices.map(\.id) == [.codex, .antigravity, .copilot])
+        #expect(model.activeServiceID == .codex)
+
+        // Disable active service (codex) -> shuts it down and switches to antigravity
+        model.setServiceEnabled(.codex, enabled: false)
+        #expect(!model.isServiceEnabled(.codex))
+        #expect(codex.shutdownCount == 1)
+        #expect(model.enabledServices.map(\.id) == [.antigravity, .copilot])
+        #expect(model.activeServiceID == .antigravity)
+        #expect(defaults.stringArray(forKey: "disabledServiceIDs") == ["codex"])
+
+        // Disabled service cannot be selected
+        model.selectService(.codex)
+        #expect(model.activeServiceID == .antigravity)
+
+        // Disable remaining services -> activeServiceID becomes nil while detectedServices stays intact
+        model.setServiceEnabled(.antigravity, enabled: false)
+        #expect(model.activeServiceID == .copilot)
+        model.setServiceEnabled(.copilot, enabled: false)
+        #expect(model.activeServiceID == nil)
+        #expect(model.enabledServices.isEmpty)
+        #expect(model.detectedServices.count == 3)
+
+        // Re-enabling one service when none are active activates and refreshes it immediately
+        model.setServiceEnabled(.copilot, enabled: true)
+        #expect(model.activeServiceID == .copilot)
+        try await waitUntil { copilot.fetchCount >= 2 }
+
+        // A fresh MeterModel with the same defaults restores disabled services
+        let reloaded = MeterModel(
+            registry: ServiceRegistry(providers: [
+                ControlledProvider(descriptor: .codex, detected: true),
+                ControlledProvider(descriptor: .antigravity, detected: true),
+                ControlledProvider(descriptor: .copilot, detected: true),
+            ]),
+            defaults: defaults,
+            startAutomatically: false,
+            scheduler: { _, _ in }
+        )
+        defer { reloaded.stop() }
+        #expect(!reloaded.isServiceEnabled(.codex))
+        #expect(!reloaded.isServiceEnabled(.antigravity))
+        #expect(reloaded.isServiceEnabled(.copilot))
+        #expect(reloaded.enabledServices.map(\.id) == [.copilot])
+        #expect(reloaded.activeServiceID == .copilot)
+    }
 }
 
 private struct WaitTimeout: Error {}

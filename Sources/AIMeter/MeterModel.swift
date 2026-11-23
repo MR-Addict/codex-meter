@@ -6,6 +6,7 @@ import Combine
 
 @MainActor final class MeterModel: ObservableObject {
     @Published private(set) var allServices: [DetectedService] = []
+    @Published private(set) var disabledServiceIDs: Set<ServiceID> = []
     @Published private(set) var activeServiceID: ServiceID?
     @Published var showingSettings = false
     @Published var expandedSectionIDs: Set<String> = []
@@ -32,9 +33,18 @@ import Combine
     private var copiedResetTask: Task<Void, Never>?
 
     private static let activeServiceDefaultsKey = "activeServiceID"
+    private static let disabledServicesDefaultsKey = "disabledServiceIDs"
 
     var detectedServices: [DetectedService] {
         allServices.filter(\.isDetected)
+    }
+
+    var enabledServices: [DetectedService] {
+        allServices.filter { $0.isDetected && !disabledServiceIDs.contains($0.id) }
+    }
+
+    func isServiceEnabled(_ serviceID: ServiceID) -> Bool {
+        !disabledServiceIDs.contains(serviceID)
     }
 
     var activeDescriptor: ServiceDescriptor? {
@@ -86,6 +96,9 @@ import Combine
         self.defaults = defaults
         self.testScheduler = scheduler
 
+        let savedDisabled = defaults.stringArray(forKey: Self.disabledServicesDefaultsKey) ?? []
+        self.disabledServiceIDs = Set(savedDisabled.map { ServiceID($0) })
+
         for provider in self.registry.providers {
             let serviceState = ServiceState(descriptor: provider.descriptor)
             states[provider.descriptor.id] = serviceState
@@ -108,16 +121,16 @@ import Combine
 
     private func performInitialDiscovery() {
         allServices = registry.detectAll()
-        let detected = detectedServices
-        if detected.isEmpty {
+        let available = enabledServices
+        if available.isEmpty {
             activeServiceID = nil
             return
         }
         if let savedRaw = defaults.string(forKey: Self.activeServiceDefaultsKey),
-           detected.contains(where: { $0.id.rawValue == savedRaw }) {
+           available.contains(where: { $0.id.rawValue == savedRaw }) {
             activeServiceID = ServiceID(savedRaw)
         } else {
-            activeServiceID = detected.first?.id
+            activeServiceID = available.first?.id
         }
     }
 
@@ -125,22 +138,51 @@ import Combine
         guard !stopping else { return }
         let previousActive = activeServiceID
         allServices = registry.detectAll()
-        let detected = detectedServices
+        let available = enabledServices
 
         let nextActive: ServiceID?
-        if let previousActive, detected.contains(where: { $0.id == previousActive }) {
+        if let previousActive, available.contains(where: { $0.id == previousActive }) {
             nextActive = previousActive
         } else if let savedRaw = defaults.string(forKey: Self.activeServiceDefaultsKey),
-                  detected.contains(where: { $0.id.rawValue == savedRaw }) {
+                  available.contains(where: { $0.id.rawValue == savedRaw }) {
             nextActive = ServiceID(savedRaw)
         } else {
-            nextActive = detected.first?.id
+            nextActive = available.first?.id
         }
 
         if nextActive != previousActive {
             transitionActiveService(from: previousActive, to: nextActive, persist: false)
         } else if nextActive != nil {
             refresh(force: true)
+        }
+    }
+
+    func setServiceEnabled(_ serviceID: ServiceID, enabled: Bool) {
+        guard !stopping else { return }
+        let currentlyEnabled = !disabledServiceIDs.contains(serviceID)
+        guard currentlyEnabled != enabled else { return }
+
+        if enabled {
+            disabledServiceIDs.remove(serviceID)
+        } else {
+            disabledServiceIDs.insert(serviceID)
+        }
+        defaults.set(
+            disabledServiceIDs.map(\.rawValue).sorted(),
+            forKey: Self.disabledServicesDefaultsKey
+        )
+
+        if !enabled {
+            if activeServiceID == serviceID {
+                let nextActive = enabledServices.first?.id
+                transitionActiveService(from: serviceID, to: nextActive, persist: false)
+            } else {
+                registry.provider(for: serviceID)?.shutdown()
+            }
+        } else {
+            if activeServiceID == nil, enabledServices.contains(where: { $0.id == serviceID }) {
+                transitionActiveService(from: nil, to: serviceID, persist: true)
+            }
         }
     }
 
@@ -155,7 +197,7 @@ import Combine
     func selectService(_ serviceID: ServiceID) {
         guard !stopping else { return }
         guard serviceID != activeServiceID else { return }
-        guard detectedServices.contains(where: { $0.id == serviceID }) else { return }
+        guard enabledServices.contains(where: { $0.id == serviceID }) else { return }
         transitionActiveService(from: activeServiceID, to: serviceID, persist: true)
     }
 
@@ -287,7 +329,7 @@ import Combine
         guard now - lastResume >= 2 else { return }
         lastResume = now
         allServices = registry.detectAll()
-        if let activeServiceID, detectedServices.contains(where: { $0.id == activeServiceID }) {
+        if let activeServiceID, enabledServices.contains(where: { $0.id == activeServiceID }) {
             // Discard pre-sleep work and its transport; never await its timeout.
             replaceActiveProvider()
         } else {
@@ -411,13 +453,20 @@ import Combine
     private func applyProviderConfigurationChange(for serviceID: ServiceID) {
         allServices = registry.detectAll()
         if detectedServices.contains(where: { $0.id == serviceID }) {
+            if disabledServiceIDs.contains(serviceID) {
+                disabledServiceIDs.remove(serviceID)
+                defaults.set(
+                    disabledServiceIDs.map(\.rawValue).sorted(),
+                    forKey: Self.disabledServicesDefaultsKey
+                )
+            }
             if activeServiceID == serviceID {
                 replaceActiveProvider()
             } else {
                 transitionActiveService(from: activeServiceID, to: serviceID, persist: true)
             }
         } else if activeServiceID == serviceID {
-            let next = detectedServices.first?.id
+            let next = enabledServices.first?.id
             transitionActiveService(from: serviceID, to: next, persist: false)
         }
     }

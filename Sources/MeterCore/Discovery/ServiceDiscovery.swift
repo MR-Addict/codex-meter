@@ -44,6 +44,7 @@ public struct DetectedService: Identifiable, Equatable, Sendable {
         ServiceRegistry(providers: [
             CodexProvider(),
             AntigravityProvider(),
+            CopilotProvider(),
         ])
     }
 

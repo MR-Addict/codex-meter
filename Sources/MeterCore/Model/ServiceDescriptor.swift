@@ -16,12 +16,14 @@ public struct ServiceID: RawRepresentable, Hashable, Codable, Sendable, CustomSt
 
     public static let codex = ServiceID("codex")
     public static let antigravity = ServiceID("antigravity")
+    public static let copilot = ServiceID("copilot")
 }
 
 /// Visual icon identity rendered in the menu bar and popover header.
 public enum ServiceIconKind: String, Equatable, Hashable, Sendable {
     case codex
     case antigravity
+    case copilot
     case generic
 }
 
@@ -86,5 +88,18 @@ public struct ServiceDescriptor: Identifiable, Equatable, Hashable, Sendable {
         executableName: "agy",
         requirementLabel: "Antigravity CLI (agy)",
         supportsStatusFile: true
+    )
+
+    public static let copilot = ServiceDescriptor(
+        id: .copilot,
+        name: "Copilot",
+        shortName: "Copilot",
+        defaultSubtitle: "GitHub Copilot quota",
+        iconKind: .copilot,
+        docsURL: URL(string: "https://cli.github.com")!,
+        loginCommand: "gh auth login",
+        executableName: "gh",
+        requirementLabel: "GitHub CLI (gh)",
+        supportsStatusFile: false
     )
 }

@@ -6,6 +6,7 @@ A lightweight macOS menu bar app for monitoring AI coding tool usage limits and 
 
 - **OpenAI Codex** (`codex` CLI)
 - **Google Antigravity** (`agy` CLI)
+- **GitHub Copilot** (`gh` CLI)
 
 Automatically detects installed CLIs, shows one active readout in the menu bar, and lets you switch services from the popover (`⌘1`, `⌘2`, …).
 
@@ -13,7 +14,7 @@ Automatically detects installed CLIs, shows one active readout in the menu bar, 
 
 - macOS 13+
 - Swift 6+ (`xcode-select --install`)
-- At least one supported CLI signed in (`codex login` or `agy`)
+- At least one supported CLI signed in (`codex login`, `agy`, or `gh auth login`)
 
 ## Build & install
 
