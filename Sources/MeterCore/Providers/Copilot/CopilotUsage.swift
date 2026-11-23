@@ -149,7 +149,6 @@ public struct CopilotUsage: Equatable, Sendable {
                 QuotaSection(
                     id: "copilot-monthly",
                     title: "Monthly allowance",
-                    layout: .compact,
                     items: items,
                     isCollapsible: false,
                     isExpandedByDefault: true
@@ -169,7 +168,6 @@ public struct CopilotUsage: Equatable, Sendable {
                 QuotaSection(
                     id: "copilot-included",
                     title: "Included features",
-                    layout: .compact,
                     items: items,
                     isCollapsible: false,
                     isExpandedByDefault: true
@@ -180,7 +178,6 @@ public struct CopilotUsage: Equatable, Sendable {
                 QuotaSection(
                     id: "copilot-empty",
                     title: "Monthly allowance",
-                    layout: .compact,
                     items: [],
                     emptyMessage: "No quota limits reported",
                     isCollapsible: false,
@@ -230,6 +227,7 @@ public struct CopilotUsage: Equatable, Sendable {
             planName: planName,
             headline: headline,
             sections: sections,
+            collapsibleSectionTitle: "Included features",
             badges: badges
         )
     }
@@ -256,13 +254,11 @@ public struct CopilotUsage: Equatable, Sendable {
         // 1. Standard `quota_snapshots` / `quotaSnapshots` dictionary
         if let snapshots = (root["quota_snapshots"] as? [String: Any]) ?? (root["quotaSnapshots"] as? [String: Any]) {
             hasRecognizedStructure = true
-            let preferredOrder = ["ai_credits", "premium_interactions", "chat", "completions"]
-            let sortedKeys = snapshots.keys.sorted { lhs, rhs in
-                let leftIdx = preferredOrder.firstIndex(of: lhs.lowercased()) ?? Int.max
-                let rightIdx = preferredOrder.firstIndex(of: rhs.lowercased()) ?? Int.max
-                if leftIdx != rightIdx { return leftIdx < rightIdx }
-                return lhs < rhs
-            }
+            let sortedKeys = JSONParsing.sortedKeys(
+                snapshots.keys,
+                preferredOrder: ["ai_credits", "premium_interactions", "chat", "completions"],
+                caseInsensitive: true
+            )
             for key in sortedKeys {
                 guard let entry = snapshots[key] as? [String: Any] else { continue }
                 let normalizedKey = normalizeBucketID(key)
@@ -287,21 +283,19 @@ public struct CopilotUsage: Equatable, Sendable {
         if let limitedQuotas = root["limited_user_quotas"] as? [String: Any] {
             hasRecognizedStructure = true
             let monthlyQuotas = (root["monthly_quotas"] as? [String: Any]) ?? [:]
-            let preferredOrder = ["premium_interactions", "chat", "completions"]
-            let sortedKeys = limitedQuotas.keys.sorted { lhs, rhs in
-                let leftIdx = preferredOrder.firstIndex(of: lhs.lowercased()) ?? Int.max
-                let rightIdx = preferredOrder.firstIndex(of: rhs.lowercased()) ?? Int.max
-                if leftIdx != rightIdx { return leftIdx < rightIdx }
-                return lhs < rhs
-            }
+            let sortedKeys = JSONParsing.sortedKeys(
+                limitedQuotas.keys,
+                preferredOrder: ["premium_interactions", "chat", "completions"],
+                caseInsensitive: true
+            )
             for key in sortedKeys {
                 let normalizedKey = normalizeBucketID(key)
                 guard !seenIDs.contains(normalizedKey),
-                      let remaining = doubleValue(limitedQuotas[key]) else { continue }
-                let entitlement = doubleValue(monthlyQuotas[key])
+                      let remaining = JSONParsing.doubleValue(limitedQuotas[key]) else { continue }
+                let entitlement = JSONParsing.doubleValue(monthlyQuotas[key])
                 let percent: Int?
                 if let entitlement, entitlement > 0 {
-                    percent = Int(floor(max(0, min(100, (remaining / entitlement) * 100.0))))
+                    percent = JSONParsing.clampedPercent((remaining / entitlement) * 100.0)
                 } else {
                     percent = nil
                 }
@@ -337,10 +331,10 @@ public struct CopilotUsage: Equatable, Sendable {
         let unlimited = (dict["unlimited"] as? Bool) ?? (dict["isUnlimited"] as? Bool) ?? false
         let hasQuota = dict["has_quota"] as? Bool
         let overagePermitted = (dict["overage_permitted"] as? Bool) ?? (dict["overagePermitted"] as? Bool) ?? false
-        let overageCount = doubleValue(dict["overage_count"] ?? dict["overageCount"])
-        let entitlement = doubleValue(dict["entitlement"] ?? dict["entitlementRequests"] ?? dict["limit"])
-        let used = doubleValue(dict["used"] ?? dict["usedRequests"] ?? dict["used_requests"])
-        var remaining = doubleValue(dict["remaining"] ?? dict["quota_remaining"] ?? dict["remainingRequests"])
+        let overageCount = JSONParsing.doubleValue(dict["overage_count"] ?? dict["overageCount"])
+        let entitlement = JSONParsing.doubleValue(dict["entitlement"] ?? dict["entitlementRequests"] ?? dict["limit"])
+        let used = JSONParsing.doubleValue(dict["used"] ?? dict["usedRequests"] ?? dict["used_requests"])
+        var remaining = JSONParsing.doubleValue(dict["remaining"] ?? dict["quota_remaining"] ?? dict["remainingRequests"])
         if remaining == nil, let entitlement, let used {
             remaining = max(0, entitlement - used)
         }
@@ -399,22 +393,21 @@ public struct CopilotUsage: Equatable, Sendable {
         remaining: Double?,
         used: Double?
     ) -> Int? {
-        if let pct = doubleValue(dict["percent_remaining"] ?? dict["remainingPercentage"] ?? dict["remaining_percent"]) {
-            return Int(floor(max(0, min(100, pct))))
+        if let pct = JSONParsing.doubleValue(dict["percent_remaining"] ?? dict["remainingPercentage"] ?? dict["remaining_percent"]) {
+            return JSONParsing.clampedPercent(pct)
         }
-        if let fraction = doubleValue(dict["remaining_fraction"] ?? dict["remainingFraction"]) {
-            let scaled = fraction <= 1.0 && fraction >= 0.0 ? fraction * 100.0 : fraction
-            return Int(floor(max(0, min(100, scaled))))
+        if let fraction = JSONParsing.doubleValue(dict["remaining_fraction"] ?? dict["remainingFraction"]) {
+            return JSONParsing.percentFromFraction(fraction)
         }
-        if let usedPct = doubleValue(dict["used_percent"] ?? dict["usedPercent"] ?? dict["percent_used"]) {
-            return Int(floor(max(0, min(100, 100.0 - usedPct))))
+        if let usedPct = JSONParsing.doubleValue(dict["used_percent"] ?? dict["usedPercent"] ?? dict["percent_used"]) {
+            return JSONParsing.clampedPercent(100.0 - usedPct)
         }
         if let entitlement, entitlement > 0 {
             if let remaining {
-                return Int(floor(max(0, min(100, (remaining / entitlement) * 100.0))))
+                return JSONParsing.clampedPercent((remaining / entitlement) * 100.0)
             }
             if let used {
-                return Int(floor(max(0, min(100, ((entitlement - used) / entitlement) * 100.0))))
+                return JSONParsing.clampedPercent(((entitlement - used) / entitlement) * 100.0)
             }
         }
         return nil
@@ -454,10 +447,7 @@ public struct CopilotUsage: Equatable, Sendable {
         case "edu", "student", "free_educational_quota":
             return "Copilot Student"
         default:
-            let cleaned = trimmed
-                .replacingOccurrences(of: "_", with: " ")
-                .replacingOccurrences(of: "-", with: " ")
-                .capitalized
+            let cleaned = JSONParsing.humanizeIdentifier(trimmed)
             return cleaned.lowercased().hasPrefix("copilot") ? cleaned : "Copilot \(cleaned)"
         }
     }
@@ -465,39 +455,21 @@ public struct CopilotUsage: Equatable, Sendable {
     private static func parseResetDate(from dict: [String: Any], keys: [String]) -> Date? {
         for key in keys {
             guard let raw = dict[key] else { continue }
-            if let epoch = doubleValue(raw), epoch > 0 {
+            if let epoch = JSONParsing.doubleValue(raw), epoch > 0 {
                 return Date(timeIntervalSince1970: epoch)
             }
             if let text = raw as? String {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { continue }
-                if let iso = parseISO8601(trimmed) {
+                if let iso = JSONParsing.parseISO8601(trimmed) {
                     return iso
                 }
-                if let dateOnly = parseUTCDateOnly(trimmed) {
+                if let dateOnly = JSONParsing.parseUTCDateOnly(trimmed) {
                     return dateOnly
                 }
             }
         }
         return nil
-    }
-
-    private static func parseISO8601(_ string: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: string) { return date }
-
-        let standard = ISO8601DateFormatter()
-        standard.formatOptions = [.withInternetDateTime]
-        return standard.date(from: string)
-    }
-
-    private static func parseUTCDateOnly(_ string: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.date(from: string)
     }
 
     private static func normalizeBucketID(_ raw: String) -> String {
@@ -522,10 +494,7 @@ public struct CopilotUsage: Equatable, Sendable {
         case "completions":
             return "Completions"
         default:
-            return id
-                .replacingOccurrences(of: "_", with: " ")
-                .replacingOccurrences(of: "-", with: " ")
-                .capitalized
+            return JSONParsing.humanizeIdentifier(id)
         }
     }
 
@@ -535,16 +504,5 @@ public struct CopilotUsage: Equatable, Sendable {
             return String(Int(rounded))
         }
         return String(format: "%.1f", value)
-    }
-
-    private static func isBoolean(_ value: Any) -> Bool {
-        guard let number = value as? NSNumber else { return false }
-        return CFGetTypeID(number) == CFBooleanGetTypeID()
-    }
-
-    private static func doubleValue(_ raw: Any?) -> Double? {
-        if let raw, !isBoolean(raw), let num = raw as? NSNumber { return num.doubleValue }
-        if let str = raw as? String { return Double(str) }
-        return nil
     }
 }

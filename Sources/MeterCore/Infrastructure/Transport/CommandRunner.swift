@@ -1,5 +1,4 @@
 import Foundation
-import Darwin
 
 /// Captured output from a one-shot CLI invocation.
 public struct CommandOutput: Equatable, Sendable {
@@ -81,13 +80,12 @@ public final class ProcessCommandRunner: CommandRunning, @unchecked Sendable {
                 lock.unlock()
 
                 if case .failure = result {
-                    terminateProcess(process)
+                    SubprocessSupport.terminate(process)
                 }
                 cont?.resume(with: result)
             }
 
             func buildOutput(exitCode: Int32) -> CommandOutput {
-                // Drain any remaining buffered bytes after termination.
                 let tailOut = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
                 let tailErr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
                 lock.lock()
@@ -106,17 +104,10 @@ public final class ProcessCommandRunner: CommandRunning, @unchecked Sendable {
 
         let box = ExecutionBox()
         let process = box.process
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        SubprocessSupport.configure(process, executable: executable, arguments: arguments)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = box.stdoutPipe
         process.standardError = box.stderrPipe
-
-        var environment = ProcessInfo.processInfo.environment
-        let directory = URL(fileURLWithPath: executable).deletingLastPathComponent().path
-        environment["PATH"] = "\(directory):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (environment["PATH"] ?? "")
-        process.environment = environment
 
         let timeoutTask = Task {
             do {
@@ -160,16 +151,6 @@ public final class ProcessCommandRunner: CommandRunning, @unchecked Sendable {
         } onCancel: {
             timeoutTask.cancel()
             box.finish(.failure(CancellationError()))
-        }
-    }
-}
-
-private func terminateProcess(_ process: Process) {
-    guard process.isRunning else { return }
-    process.terminate()
-    DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
         }
     }
 }

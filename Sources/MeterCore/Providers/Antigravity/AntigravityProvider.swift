@@ -1,25 +1,48 @@
 import Foundation
 
+public extension ServiceID {
+    static let antigravity = ServiceID("antigravity")
+}
+
+public extension ServiceDescriptor {
+    static let antigravity = ServiceDescriptor(
+        id: .antigravity,
+        name: "Antigravity",
+        shortName: "Antigravity",
+        defaultSubtitle: "Google AI quota",
+        docsURL: URL(string: "https://antigravity.google/docs/cli/reference")!,
+        loginCommand: "agy",
+        executableName: "agy",
+        requirementLabel: "Antigravity CLI (agy)"
+    )
+}
+
 /// Google Antigravity provider using the documented `agy` CLI headless JSON command,
 /// with optional `statusLine` JSON cache file fallback.
 @MainActor public final class AntigravityProvider: UsageProvider {
-    public let descriptor = ServiceDescriptor.antigravity
-    public let configKeys = ProviderConfigKeys(
-        executablePathKey: "antigravityCLIPath",
-        statusFilePathKey: "antigravityStatusFilePath"
-    )
-
     public static let defaultStatusFileRelativePath = ".gemini/antigravity-cli/meter-status.json"
+
+    public let descriptor = ServiceDescriptor.antigravity
+    public let configSpec = ProviderConfigSpec(
+        executablePathKey: "antigravityCLIPath",
+        supplementalFile: SupplementalFileConfig(
+            defaultsKey: "antigravityStatusFilePath",
+            buttonTitle: "Status JSON…",
+            clearButtonTitle: "Clear JSON",
+            panelTitle: "Choose Antigravity status JSON file",
+            defaultRelativeDirectory: ".gemini/antigravity-cli",
+            unreadableErrorMessage: "Choose a readable JSON file exported by Antigravity."
+        )
+    )
 
     private let locateExecutable: @MainActor () -> String?
     private let locateStatusFile: @MainActor () -> String?
     private let readStatusFile: (String) throws -> Data
-    private let runner: any CommandRunning
-    private let timeout: TimeInterval
+    private let session: CommandSession
     private let now: () -> Date
-    private var activeTask: Task<CommandOutput, Error>?
 
     public init(
+        configStore: any ProviderConfigStore = UserDefaultsConfigStore(),
         locateExecutable: (@MainActor () -> String?)? = nil,
         locateStatusFile: (@MainActor () -> String?)? = nil,
         readStatusFile: ((String) throws -> Data)? = nil,
@@ -27,11 +50,13 @@ import Foundation
         timeout: TimeInterval = 20,
         now: @escaping () -> Date = Date.init
     ) {
+        let executableKey = "antigravityCLIPath"
+        let statusFileKey = "antigravityStatusFilePath"
         self.locateExecutable = locateExecutable ?? {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             return ExecutableLocator.locate(
-                name: "agy",
-                custom: UserDefaults.standard.string(forKey: "antigravityCLIPath"),
+                name: ServiceDescriptor.antigravity.executableName,
+                custom: configStore.string(forKey: executableKey),
                 extraCandidates: [
                     "\(home)/.antigravity/bin/agy",
                     "\(home)/.gemini/antigravity/bin/agy",
@@ -39,7 +64,7 @@ import Foundation
             )
         }
         self.locateStatusFile = locateStatusFile ?? {
-            if let custom = UserDefaults.standard.string(forKey: "antigravityStatusFilePath"), !custom.isEmpty {
+            if let custom = configStore.string(forKey: statusFileKey), !custom.isEmpty {
                 let expanded = (custom as NSString).expandingTildeInPath
                 return FileManager.default.isReadableFile(atPath: expanded) ? expanded : nil
             }
@@ -50,8 +75,7 @@ import Foundation
         self.readStatusFile = readStatusFile ?? { path in
             try Data(contentsOf: URL(fileURLWithPath: path))
         }
-        self.runner = runner
-        self.timeout = timeout
+        self.session = CommandSession(runner: runner, timeout: timeout)
         self.now = now
     }
 
@@ -70,7 +94,10 @@ import Foundation
 
         if let executable = locateExecutable() {
             do {
-                let output = try await runCommand(executable: executable)
+                let output = try await session.run(
+                    executable: executable,
+                    arguments: ["--print", "/usage", "--output-format", "json", "--print-timeout", "18s"]
+                )
                 if output.exitCode == 0 {
                     let parsed = try AntigravityUsage.decode(output.stdout, now: now())
                     return parsed.toSnapshot(fetchedAt: now())
@@ -96,19 +123,8 @@ import Foundation
                     return fallback
                 }
                 throw ProviderError.serviceUnavailable(serviceName: descriptor.name)
-            } catch let error as ProviderError {
-                throw error
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch let runnerError as CommandRunnerError {
-                switch runnerError {
-                case .timedOut:
-                    throw ProviderError.timeout(serviceName: descriptor.name)
-                case .launchFailed:
-                    throw ProviderError.launchFailed(serviceName: descriptor.name)
-                }
             } catch {
-                throw ProviderError.malformed(serviceName: descriptor.name)
+                throw CommandSession.mapError(error, serviceName: descriptor.name)
             }
         }
 
@@ -123,8 +139,7 @@ import Foundation
     }
 
     public func shutdown() {
-        activeTask?.cancel()
-        activeTask = nil
+        session.cancel()
     }
 
     public func resetClient() {
@@ -132,26 +147,6 @@ import Foundation
     }
 
     // MARK: - Helpers
-
-    private func runCommand(executable: String) async throws -> CommandOutput {
-        activeTask?.cancel()
-        let runner = self.runner
-        let timeout = self.timeout
-        let task = Task<CommandOutput, Error> {
-            try await runner.run(
-                executable: executable,
-                arguments: ["--print", "/usage", "--output-format", "json", "--print-timeout", "18s"],
-                timeout: timeout
-            )
-        }
-        activeTask = task
-        defer { activeTask = nil }
-        return try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: {
-            task.cancel()
-        }
-    }
 
     private func readStatusFileSnapshot() throws -> UsageSnapshot? {
         guard let statusFile = locateStatusFile() else { return nil }

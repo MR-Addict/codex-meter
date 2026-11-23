@@ -1,21 +1,37 @@
 import Foundation
 
+public extension ServiceID {
+    static let copilot = ServiceID("copilot")
+}
+
+public extension ServiceDescriptor {
+    static let copilot = ServiceDescriptor(
+        id: .copilot,
+        name: "Copilot",
+        shortName: "Copilot",
+        defaultSubtitle: "GitHub Copilot quota",
+        docsURL: URL(string: "https://cli.github.com")!,
+        loginCommand: "gh auth login",
+        executableName: "gh",
+        requirementLabel: "GitHub CLI (gh)"
+    )
+}
+
 /// GitHub Copilot provider backed by the local GitHub CLI (`gh api /copilot_internal/user`).
 ///
 /// Reuses the user's existing `gh auth login` session without storing or reading tokens directly.
 @MainActor public final class CopilotProvider: UsageProvider {
     public let descriptor = ServiceDescriptor.copilot
-    public let configKeys = ProviderConfigKeys(executablePathKey: "copilotCLIPath")
+    public let configSpec = ProviderConfigSpec(executablePathKey: "copilotCLIPath")
 
     private let locateExecutable: @MainActor () -> String?
     private let hasCustomExecutable: @MainActor () -> Bool
     private let hasCopilotFootprint: @MainActor () -> Bool
-    private let runner: any CommandRunning
-    private let timeout: TimeInterval
+    private let session: CommandSession
     private let now: () -> Date
-    private var activeTask: Task<CommandOutput, Error>?
 
     public init(
+        configStore: any ProviderConfigStore = UserDefaultsConfigStore(),
         locateExecutable: (@MainActor () -> String?)? = nil,
         hasCustomExecutable: (@MainActor () -> Bool)? = nil,
         hasCopilotFootprint: (@MainActor () -> Bool)? = nil,
@@ -23,21 +39,21 @@ import Foundation
         timeout: TimeInterval = 20,
         now: @escaping () -> Date = Date.init
     ) {
+        let key = "copilotCLIPath"
         self.locateExecutable = locateExecutable ?? {
             ExecutableLocator.locate(
-                name: "gh",
-                custom: UserDefaults.standard.string(forKey: "copilotCLIPath")
+                name: ServiceDescriptor.copilot.executableName,
+                custom: configStore.string(forKey: key)
             )
         }
         self.hasCustomExecutable = hasCustomExecutable ?? {
-            let custom = UserDefaults.standard.string(forKey: "copilotCLIPath") ?? ""
+            let custom = configStore.string(forKey: key) ?? ""
             return !custom.isEmpty
         }
         self.hasCopilotFootprint = hasCopilotFootprint ?? {
             Self.defaultCopilotFootprintExists()
         }
-        self.runner = runner
-        self.timeout = timeout
+        self.session = CommandSession(runner: runner, timeout: timeout)
         self.now = now
     }
 
@@ -65,7 +81,15 @@ import Foundation
         }
 
         do {
-            let output = try await runCommand(executable: executable)
+            let output = try await session.run(
+                executable: executable,
+                arguments: [
+                    "api",
+                    "/copilot_internal/user",
+                    "-H", "Accept: application/json",
+                    "-H", "X-GitHub-Api-Version: 2025-04-01",
+                ]
+            )
             if output.exitCode == 0 {
                 let parsed = try CopilotUsage.decode(output.stdout, now: now())
                 return parsed.toSnapshot(fetchedAt: now())
@@ -92,25 +116,13 @@ import Foundation
                 )
             }
             throw ProviderError.serviceUnavailable(serviceName: descriptor.name)
-        } catch let error as ProviderError {
-            throw error
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let runnerError as CommandRunnerError {
-            switch runnerError {
-            case .timedOut:
-                throw ProviderError.timeout(serviceName: descriptor.name)
-            case .launchFailed:
-                throw ProviderError.launchFailed(serviceName: descriptor.name)
-            }
         } catch {
-            throw ProviderError.malformed(serviceName: descriptor.name)
+            throw CommandSession.mapError(error, serviceName: descriptor.name)
         }
     }
 
     public func shutdown() {
-        activeTask?.cancel()
-        activeTask = nil
+        session.cancel()
     }
 
     public func resetClient() {
@@ -118,31 +130,6 @@ import Foundation
     }
 
     // MARK: - Helpers
-
-    private func runCommand(executable: String) async throws -> CommandOutput {
-        activeTask?.cancel()
-        let runner = self.runner
-        let timeout = self.timeout
-        let task = Task<CommandOutput, Error> {
-            try await runner.run(
-                executable: executable,
-                arguments: [
-                    "api",
-                    "/copilot_internal/user",
-                    "-H", "Accept: application/json",
-                    "-H", "X-GitHub-Api-Version: 2025-04-01",
-                ],
-                timeout: timeout
-            )
-        }
-        activeTask = task
-        defer { activeTask = nil }
-        return try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: {
-            task.cancel()
-        }
-    }
 
     private func isAuthFailure(_ text: String) -> Bool {
         text.contains("not logged into")

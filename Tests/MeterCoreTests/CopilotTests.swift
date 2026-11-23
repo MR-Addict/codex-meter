@@ -235,20 +235,6 @@ struct CopilotUsageTests {
     }
 }
 
-private final class MockCopilotRunner: CommandRunning, @unchecked Sendable {
-    var result: Result<CommandOutput, Error>
-    var recordedCalls: [(executable: String, arguments: [String])] = []
-
-    init(result: Result<CommandOutput, Error>) {
-        self.result = result
-    }
-
-    func run(executable: String, arguments: [String], timeout: TimeInterval) async throws -> CommandOutput {
-        recordedCalls.append((executable, arguments))
-        return try result.get()
-    }
-}
-
 struct CopilotProviderTests {
     @Test @MainActor func fetchesFromGhCLISuccessfully() async throws {
         let json = """
@@ -266,7 +252,7 @@ struct CopilotProviderTests {
           }
         }
         """
-        let runner = MockCopilotRunner(result: .success(CommandOutput(exitCode: 0, stdout: Data(json.utf8))))
+        let runner = StubCommandRunner(result: .success(CommandOutput(exitCode: 0, stdout: Data(json.utf8))))
         let provider = CopilotProvider(
             locateExecutable: { "/opt/homebrew/bin/gh" },
             hasCustomExecutable: { false },
@@ -277,6 +263,7 @@ struct CopilotProviderTests {
         #expect(provider.detect() == .detected(source: "/opt/homebrew/bin/gh"))
         let snapshot = try await provider.fetchUsage()
         #expect(snapshot.serviceID == .copilot)
+        #expect(snapshot.collapsibleSectionTitle == "Included features")
         #expect(snapshot.remainingPercent == 70)
         #expect(runner.recordedCalls.count == 1)
         #expect(runner.recordedCalls[0].executable == "/opt/homebrew/bin/gh")
@@ -288,7 +275,7 @@ struct CopilotProviderTests {
             locateExecutable: { "/opt/homebrew/bin/gh" },
             hasCustomExecutable: { false },
             hasCopilotFootprint: { false },
-            runner: MockCopilotRunner(result: .failure(CommandRunnerError.launchFailed))
+            runner: StubCommandRunner(result: .failure(CommandRunnerError.launchFailed))
         )
         #expect(ghOnly.detect() == .notFound)
 
@@ -296,7 +283,7 @@ struct CopilotProviderTests {
             locateExecutable: { "/opt/homebrew/bin/gh" },
             hasCustomExecutable: { true },
             hasCopilotFootprint: { false },
-            runner: MockCopilotRunner(result: .failure(CommandRunnerError.launchFailed))
+            runner: StubCommandRunner(result: .failure(CommandRunnerError.launchFailed))
         )
         #expect(customEnabled.detect() == .detected(source: "/opt/homebrew/bin/gh"))
 
@@ -322,7 +309,7 @@ struct CopilotProviderTests {
 
     @Test @MainActor func mapsAuthAccessTimeoutAndMissingExecutableErrors() async {
         // 1. Not logged in to gh
-        let unauthRunner = MockCopilotRunner(
+        let unauthRunner = StubCommandRunner(
             result: .success(CommandOutput(exitCode: 1, stdout: Data(), stderr: Data("To get started with GitHub CLI, please run:  gh auth login".utf8)))
         )
         let unauthProvider = CopilotProvider(
@@ -341,7 +328,7 @@ struct CopilotProviderTests {
         }
 
         // 2. 403/404 missing Copilot license
-        let forbiddenRunner = MockCopilotRunner(
+        let forbiddenRunner = StubCommandRunner(
             result: .success(CommandOutput(exitCode: 1, stdout: Data(), stderr: Data("gh: This API requires a valid Copilot license (HTTP 403)".utf8)))
         )
         let forbiddenProvider = CopilotProvider(
@@ -362,7 +349,7 @@ struct CopilotProviderTests {
         let timeoutProvider = CopilotProvider(
             locateExecutable: { "/opt/homebrew/bin/gh" },
             hasCustomExecutable: { true },
-            runner: MockCopilotRunner(result: .failure(CommandRunnerError.timedOut))
+            runner: StubCommandRunner(result: .failure(CommandRunnerError.timedOut))
         )
         do {
             _ = try await timeoutProvider.fetchUsage()
@@ -378,7 +365,7 @@ struct CopilotProviderTests {
             locateExecutable: { nil },
             hasCustomExecutable: { false },
             hasCopilotFootprint: { false },
-            runner: MockCopilotRunner(result: .failure(CommandRunnerError.launchFailed))
+            runner: StubCommandRunner(result: .failure(CommandRunnerError.launchFailed))
         )
         do {
             _ = try await missingProvider.fetchUsage()

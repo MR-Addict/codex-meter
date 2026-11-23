@@ -1,4 +1,5 @@
 import Foundation
+import ServiceManagement
 import Testing
 import MeterCore
 @testable import AIMeter
@@ -37,16 +38,23 @@ import MeterCore
 
 @MainActor private final class ControlledProvider: UsageProvider {
     let descriptor: ServiceDescriptor
-    let configKeys: ProviderConfigKeys
+    let configSpec: ProviderConfigSpec
     var detected: Bool
     var fetchCount = 0
     var shutdownCount = 0
     var pendingContinuations: [CheckedContinuation<UsageSnapshot, Error>] = []
     var immediateResult: Result<UsageSnapshot, Error>?
 
-    init(descriptor: ServiceDescriptor, detected: Bool = true) {
+    init(
+        descriptor: ServiceDescriptor,
+        detected: Bool = true,
+        supplementalFile: SupplementalFileConfig? = nil
+    ) {
         self.descriptor = descriptor
-        self.configKeys = ProviderConfigKeys(executablePathKey: "\(descriptor.id.rawValue)Path")
+        self.configSpec = ProviderConfigSpec(
+            executablePathKey: "\(descriptor.id.rawValue)Path",
+            supplementalFile: supplementalFile
+        )
         self.detected = detected
     }
 
@@ -75,12 +83,6 @@ import MeterCore
         cont.resume(returning: snapshot)
     }
 
-    func failNext(_ error: Error) {
-        guard !pendingContinuations.isEmpty else { return }
-        let cont = pendingContinuations.removeFirst()
-        cont.resume(throwing: error)
-    }
-
     func shutdown() {
         shutdownCount += 1
         let pending = pendingContinuations
@@ -93,11 +95,54 @@ import MeterCore
     }
 }
 
-private func makeIsolatedDefaults() -> UserDefaults {
-    let suite = "ai-meter-test-\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suite)!
-    defaults.removePersistentDomain(forName: suite)
-    return defaults
+@MainActor private final class MockPlatformActions: PlatformActions {
+    var chosenFileURL: URL?
+    var executablePaths: Set<String> = []
+    var readablePaths: Set<String> = []
+    var copiedTexts: [String] = []
+    var loginStatus: SMAppService.Status = .notRegistered
+    var lastFilePanelTitle: String?
+    var terminated = false
+
+    func chooseFile(title: String, initialDirectory: URL?) -> URL? {
+        lastFilePanelTitle = title
+        return chosenFileURL
+    }
+
+    func isExecutableFile(atPath path: String) -> Bool {
+        executablePaths.contains(path)
+    }
+
+    func isReadableFile(atPath path: String) -> Bool {
+        readablePaths.contains(path)
+    }
+
+    func copyToClipboard(_ text: String) {
+        copiedTexts.append(text)
+    }
+
+    func loginItemStatus() -> SMAppService.Status {
+        loginStatus
+    }
+
+    func setLoginItemEnabled(_ enabled: Bool) throws -> SMAppService.Status {
+        loginStatus = enabled ? .enabled : .notRegistered
+        return loginStatus
+    }
+
+    func observeSystemEvents(
+        onWake: @escaping @MainActor () -> Void,
+        onAppActive: @escaping @MainActor () -> Void,
+        onTerminate: @escaping @MainActor () -> Void
+    ) -> [NSObjectProtocol] {
+        []
+    }
+
+    func removeSystemObservers(_ observers: [NSObjectProtocol]) {}
+
+    func terminateApp() {
+        terminated = true
+    }
 }
 
 struct MeterModelTests {
@@ -106,11 +151,12 @@ struct MeterModelTests {
         var scheduled: [(TimeInterval, @MainActor () -> Void)] = []
         let provider = CodexProvider(
             locateExecutable: { "/opt/homebrew/bin/codex" },
-            makeClient: { RPCClient { pipe } }
+            makeClient: { CodexRPCClient { pipe } }
         )
         let model = MeterModel(
             registry: ServiceRegistry(providers: [provider]),
-            defaults: makeIsolatedDefaults(),
+            configStore: InMemoryConfigStore(),
+            platform: MockPlatformActions(),
             startAutomatically: false,
             scheduler: { scheduled.append(($0, $1)) }
         )
@@ -144,7 +190,7 @@ struct MeterModelTests {
         let provider = CodexProvider(
             locateExecutable: { "/opt/homebrew/bin/codex" },
             makeClient: {
-                RPCClient {
+                CodexRPCClient {
                     let pipe = ControlledTransport()
                     pipes.append(pipe)
                     return pipe
@@ -153,7 +199,8 @@ struct MeterModelTests {
         )
         let model = MeterModel(
             registry: ServiceRegistry(providers: [provider]),
-            defaults: makeIsolatedDefaults(),
+            configStore: InMemoryConfigStore(),
+            platform: MockPlatformActions(),
             startAutomatically: false,
             scheduler: { _, _ in }
         )
@@ -177,14 +224,15 @@ struct MeterModelTests {
         let provider = CodexProvider(
             locateExecutable: { "/opt/homebrew/bin/codex" },
             makeClient: {
-                RPCClient {
+                CodexRPCClient {
                     throw ProviderError.authRequired(serviceName: "Codex", command: "codex login")
                 }
             }
         )
         let model = MeterModel(
             registry: ServiceRegistry(providers: [provider]),
-            defaults: makeIsolatedDefaults(),
+            configStore: InMemoryConfigStore(),
+            platform: MockPlatformActions(),
             startAutomatically: false,
             scheduler: { scheduled.append(($0, $1)) }
         )
@@ -205,88 +253,16 @@ struct MeterModelTests {
         #expect(model.activeState?.retryAt == nil)
     }
 
-    @Test @MainActor func zeroServicesDetectedAndRescanAutoSelects() async throws {
-        let codex = ControlledProvider(descriptor: .codex, detected: false)
-        let agy = ControlledProvider(descriptor: .antigravity, detected: false)
-        var scheduled: [(TimeInterval, @MainActor () -> Void)] = []
-        let model = MeterModel(
-            registry: ServiceRegistry(providers: [codex, agy]),
-            defaults: makeIsolatedDefaults(),
-            startAutomatically: false,
-            scheduler: { scheduled.append(($0, $1)) }
-        )
-        defer { model.stop() }
-
-        #expect(model.detectedServices.isEmpty)
-        #expect(model.activeServiceID == nil)
-        model.refresh()
-        #expect(codex.fetchCount == 0)
-        #expect(agy.fetchCount == 0)
-        #expect(scheduled.isEmpty)
-
-        // User installs Antigravity CLI and rescans
-        agy.detected = true
-        model.rescanServices()
-        #expect(model.detectedServices.map(\.id) == [.antigravity])
-        #expect(model.activeServiceID == .antigravity)
-        try await waitUntil { agy.fetchCount == 1 }
-        agy.resolveNext(remaining: 88)
-        try await waitUntil { model.activeState?.refreshing == false }
-        #expect(model.activeState?.snapshot?.remainingPercent == 88)
-    }
-
-    @Test @MainActor func switchingServicesShutsDownPreviousIsolatesStaleResultsAndRetainsCache() async throws {
-        let codex = ControlledProvider(descriptor: .codex, detected: true)
-        let agy = ControlledProvider(descriptor: .antigravity, detected: true)
-        var scheduled: [(TimeInterval, @MainActor () -> Void)] = []
-        let defaults = makeIsolatedDefaults()
-        let model = MeterModel(
-            registry: ServiceRegistry(providers: [codex, agy]),
-            defaults: defaults,
-            startAutomatically: false,
-            scheduler: { scheduled.append(($0, $1)) }
-        )
-        defer { model.stop() }
-
-        #expect(model.detectedServices.count == 2)
-        #expect(model.activeServiceID == .codex)
-
-        // Complete initial Codex fetch
-        model.refresh()
-        try await waitUntil { codex.fetchCount == 1 }
-        codex.resolveNext(remaining: 91)
-        try await waitUntil { model.state(for: .codex)?.refreshing == false }
-        #expect(model.state(for: .codex)?.snapshot?.remainingPercent == 91)
-
-        // Start another Codex fetch, then switch to Antigravity mid-flight
-        model.refresh(force: true)
-        try await waitUntil { codex.fetchCount == 2 }
-        model.selectService(.antigravity)
-
-        #expect(model.activeServiceID == .antigravity)
-        #expect(defaults.string(forKey: "activeServiceID") == "antigravity")
-        #expect(codex.shutdownCount == 1)
-        #expect(model.state(for: .codex)?.refreshing == false)
-        // Codex's cached snapshot is preserved while inactive
-        #expect(model.state(for: .codex)?.snapshot?.remainingPercent == 91)
-
-        // Antigravity immediately starts refreshing
-        try await waitUntil { agy.fetchCount == 1 }
-        agy.resolveNext(remaining: 74)
-        try await waitUntil { model.state(for: .antigravity)?.refreshing == false }
-        #expect(model.activeState?.snapshot?.remainingPercent == 74)
-        #expect(scheduled.last?.0 == 60)
-    }
-
     @Test @MainActor func threeServicesCoexistAndSwitchToCopilot() async throws {
         let codex = ControlledProvider(descriptor: .codex, detected: true)
         let agy = ControlledProvider(descriptor: .antigravity, detected: true)
         let copilot = ControlledProvider(descriptor: .copilot, detected: true)
         var scheduled: [(TimeInterval, @MainActor () -> Void)] = []
-        let defaults = makeIsolatedDefaults()
+        let store = InMemoryConfigStore()
         let model = MeterModel(
             registry: ServiceRegistry(providers: [codex, agy, copilot]),
-            defaults: defaults,
+            configStore: store,
+            platform: MockPlatformActions(),
             startAutomatically: false,
             scheduler: { scheduled.append(($0, $1)) }
         )
@@ -297,7 +273,7 @@ struct MeterModelTests {
 
         model.selectService(.copilot)
         #expect(model.activeServiceID == .copilot)
-        #expect(defaults.string(forKey: "activeServiceID") == "copilot")
+        #expect(store.string(forKey: ServiceCoordinator.activeServiceDefaultsKey) == "copilot")
         try await waitUntil { copilot.fetchCount == 1 }
         copilot.resolveNext(remaining: 82)
         try await waitUntil { model.state(for: .copilot)?.refreshing == false }
@@ -305,64 +281,53 @@ struct MeterModelTests {
         #expect(scheduled.last?.0 == 60)
     }
 
-    @Test @MainActor func togglingServicesPersistsStateSwitchesActiveAndHandlesAllDisabled() async throws {
+    @Test @MainActor func platformActionsHandleExecutableValidationClipboardAndSectionDefaults() {
         let codex = ControlledProvider(descriptor: .codex, detected: true)
-        let agy = ControlledProvider(descriptor: .antigravity, detected: true)
-        let copilot = ControlledProvider(descriptor: .copilot, detected: true)
-        let defaults = makeIsolatedDefaults()
+        let store = InMemoryConfigStore()
+        let platform = MockPlatformActions()
         let model = MeterModel(
-            registry: ServiceRegistry(providers: [codex, agy, copilot]),
-            defaults: defaults,
+            registry: ServiceRegistry(providers: [codex]),
+            configStore: store,
+            platform: platform,
             startAutomatically: false,
             scheduler: { _, _ in }
         )
         defer { model.stop() }
 
-        #expect(model.enabledServices.map(\.id) == [.codex, .antigravity, .copilot])
-        #expect(model.activeServiceID == .codex)
+        // Choosing a non-executable sets preferenceError and does not persist.
+        platform.chosenFileURL = URL(fileURLWithPath: "/tmp/not-exec")
+        model.chooseExecutable(for: .codex)
+        #expect(model.preferenceError != nil)
+        #expect(!model.hasCustomExecutable(for: .codex))
 
-        // Disable active service (codex) -> shuts it down and switches to antigravity
-        model.setServiceEnabled(.codex, enabled: false)
-        #expect(!model.isServiceEnabled(.codex))
-        #expect(codex.shutdownCount == 1)
-        #expect(model.enabledServices.map(\.id) == [.antigravity, .copilot])
-        #expect(model.activeServiceID == .antigravity)
-        #expect(defaults.stringArray(forKey: "disabledServiceIDs") == ["codex"])
+        // Choosing a valid executable clears error and persists into shared config store.
+        platform.executablePaths.insert("/usr/local/bin/codex")
+        platform.chosenFileURL = URL(fileURLWithPath: "/usr/local/bin/codex")
+        model.chooseExecutable(for: .codex)
+        #expect(model.preferenceError == nil)
+        #expect(model.hasCustomExecutable(for: .codex))
+        #expect(store.string(forKey: "codexPath") == "/usr/local/bin/codex")
 
-        // Disabled service cannot be selected
-        model.selectService(.codex)
-        #expect(model.activeServiceID == .antigravity)
+        // Clipboard helper copies via PlatformActions.
+        model.copyLoginCommand("codex login")
+        #expect(platform.copiedTexts == ["codex login"])
+        #expect(model.copiedLoginCommand == "codex login")
 
-        // Disable remaining services -> activeServiceID becomes nil while detectedServices stays intact
-        model.setServiceEnabled(.antigravity, enabled: false)
-        #expect(model.activeServiceID == .copilot)
-        model.setServiceEnabled(.copilot, enabled: false)
-        #expect(model.activeServiceID == nil)
-        #expect(model.enabledServices.isEmpty)
-        #expect(model.detectedServices.count == 3)
+        // Section expansion respects `isExpandedByDefault`.
+        let collapsedSection = QuotaSection(id: "sec-collapsed", items: [], isCollapsible: true, isExpandedByDefault: false)
+        let expandedSection = QuotaSection(id: "sec-expanded", items: [], isCollapsible: true, isExpandedByDefault: true)
+        #expect(!model.isSectionExpanded(collapsedSection))
+        #expect(model.isSectionExpanded(expandedSection))
+        model.toggleSection("sec-collapsed")
+        model.toggleSection("sec-expanded")
+        #expect(model.isSectionExpanded(collapsedSection))
+        #expect(!model.isSectionExpanded(expandedSection))
 
-        // Re-enabling one service when none are active activates and refreshes it immediately
-        model.setServiceEnabled(.copilot, enabled: true)
-        #expect(model.activeServiceID == .copilot)
-        try await waitUntil { copilot.fetchCount >= 2 }
-
-        // A fresh MeterModel with the same defaults restores disabled services
-        let reloaded = MeterModel(
-            registry: ServiceRegistry(providers: [
-                ControlledProvider(descriptor: .codex, detected: true),
-                ControlledProvider(descriptor: .antigravity, detected: true),
-                ControlledProvider(descriptor: .copilot, detected: true),
-            ]),
-            defaults: defaults,
-            startAutomatically: false,
-            scheduler: { _, _ in }
-        )
-        defer { reloaded.stop() }
-        #expect(!reloaded.isServiceEnabled(.codex))
-        #expect(!reloaded.isServiceEnabled(.antigravity))
-        #expect(reloaded.isServiceEnabled(.copilot))
-        #expect(reloaded.enabledServices.map(\.id) == [.copilot])
-        #expect(reloaded.activeServiceID == .copilot)
+        // Login item & quit delegate cleanly.
+        model.setLogin(true)
+        #expect(model.loginEnabled)
+        model.quit()
+        #expect(platform.terminated)
     }
 }
 

@@ -14,6 +14,7 @@ final class CodexUsageTests {
 
         let snapshot = value.toSnapshot(fetchedAt: Date(timeIntervalSince1970: 0))
         #expect(snapshot.serviceID == .codex)
+        #expect(snapshot.collapsibleSectionTitle == "Other allowances")
         #expect(snapshot.headline?.remainingPercent == 39)
         #expect(snapshot.headline?.nearestResetAt == Date(timeIntervalSince1970: 5000))
         #expect(snapshot.sections.count == 2)
@@ -84,13 +85,11 @@ final class CodexUsageTests {
     }
 
     @Test func testPlanTypeNormalizationAndFreePlanEdgeCases() throws {
-        // Real-world prolite single-window payload
         let prolite = try parse(#"{"ordinaryUsageAllowed":true,"rateLimits":{"primary":{"usedPercent":1,"windowDurationMins":10080,"resetsAt":1796007500},"secondary":null,"planType":"prolite"}}"#)
         #expect(prolite.planName == "Pro Lite")
         #expect(prolite.toSnapshot().planName == "Pro Lite")
         #expect(prolite.remaining == 99)
 
-        // All standard & unknown plan types
         #expect(CodexUsage.normalizePlanName("free") == "Free")
         #expect(CodexUsage.normalizePlanName("go") == "Go")
         #expect(CodexUsage.normalizePlanName("plus") == "Plus")
@@ -100,7 +99,6 @@ final class CodexUsageTests {
         #expect(CodexUsage.normalizePlanName("enterprise") == "Enterprise")
         #expect(CodexUsage.normalizePlanName("custom_tier") == "Custom Tier")
 
-        // Free plan fallback when `rateLimits` is omitted and limits live under a non-"codex" bucket
         let freeScoped = try parse(#"{"rateLimitsByLimitId":{"codex_free":{"planType":"free","primary":{"usedPercent":40,"windowDurationMins":10080,"resetsAt":9000}}}}"#)
         #expect(freeScoped.planName == "Free")
         #expect(freeScoped.remaining == 60)
@@ -111,7 +109,6 @@ final class CodexUsageTests {
         #expect(freeSnapshot.sections.count == 1)
         #expect(freeSnapshot.sections[0].items.map(\.title) == ["Weekly"])
 
-        // Free plan with ordinaryUsageAllowed == false and no windows
         let freeDisallowed = try CodexUsage.decode(
             Data(#"{"ordinaryUsageAllowed":false,"rateLimits":{}}"#.utf8),
             fallbackPlanType: "free"
@@ -122,56 +119,20 @@ final class CodexUsageTests {
     }
 }
 
-@MainActor final class FakeTransport: RPCTransport {
-    var onData: ((Data) -> Void)?
-    var onExit: (() -> Void)?
-    var methods: [String] = []
-    var stopped = false
-    var response: ((String, Int) -> [String: Any]?)?
-    func start() throws {}
-    func stop() { stopped = true }
-    func write(_ data: Data) throws {
-        let message = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let method = message["method"] as! String
-        methods.append(method)
-        guard let id = message["id"] as? Int else { return }
-        let reply: [String: Any]?
-        if let response {
-            reply = response(method, id)
-        } else {
-            let result: [String: Any]
-            switch method {
-            case "account/read": result = ["account": ["type": "chatgpt"]]
-            case "account/rateLimits/read": result = ["rateLimits": ["primary": ["usedPercent": 25]]]
-            default: result = [:]
-            }
-            reply = ["id": id, "result": result]
-        }
-        guard let reply else { return }
-        // Notifications and unmatched responses must not complete a request.
-        onData?(Data("{\"method\":\"unrelated\"}\n{\"id\":9999,\"result\":{}}\n".utf8))
-        var encoded = try JSONSerialization.data(withJSONObject: reply)
-        encoded.append(10)
-        let midpoint = encoded.count / 2
-        onData?(Data(encoded.prefix(midpoint)))
-        onData?(Data(encoded.dropFirst(midpoint)))
-    }
-}
-
-final class RPCTests {
+final class CodexRPCTests {
     @Test @MainActor func testHandshakeMatchingFragmentationAndReuse() async throws {
-        let pipe = FakeTransport()
-        let client = RPCClient { pipe }
-        let first = try await client.readCodexUsage()
+        let pipe = FakeRPCTransport()
+        let client = CodexRPCClient { pipe }
+        let first = try await client.readUsage()
         #expect(first.remaining == 75)
-        _ = try await client.readCodexUsage()
+        _ = try await client.readUsage()
         #expect(pipe.methods == ["initialize", "initialized", "account/read", "account/rateLimits/read", "account/read", "account/rateLimits/read"])
         client.shutdown()
         #expect(pipe.stopped)
     }
 
     @Test @MainActor func testAccountPlanTypeFallbackAndPlanRestrictionError() async throws {
-        let pipe = FakeTransport()
+        let pipe = FakeRPCTransport()
         pipe.response = { method, id in
             switch method {
             case "initialize": return ["id": id, "result": [:]]
@@ -180,13 +141,13 @@ final class RPCTests {
             default: return ["id": id, "result": [:]]
             }
         }
-        let client = RPCClient { pipe }
-        let usage = try await client.readCodexUsage()
+        let client = CodexRPCClient { pipe }
+        let usage = try await client.readUsage()
         #expect(usage.planName == "Free")
         #expect(usage.remaining == 80)
         client.shutdown()
 
-        let restrictedPipe = FakeTransport()
+        let restrictedPipe = FakeRPCTransport()
         restrictedPipe.response = { method, id in
             switch method {
             case "initialize": return ["id": id, "result": [:]]
@@ -195,9 +156,9 @@ final class RPCTests {
             default: return ["id": id, "result": [:]]
             }
         }
-        let restrictedClient = RPCClient { restrictedPipe }
+        let restrictedClient = CodexRPCClient { restrictedPipe }
         do {
-            _ = try await restrictedClient.readCodexUsage()
+            _ = try await restrictedClient.readUsage()
             Issue.record("Expected plan restriction error")
         } catch let error as ProviderError {
             #expect(error.message.contains("current ChatGPT plan"))
@@ -206,16 +167,16 @@ final class RPCTests {
     }
 
     @Test @MainActor func testExitRecovery() async throws {
-        var pipes: [FakeTransport] = []
-        let client = RPCClient {
-            let pipe = FakeTransport()
+        var pipes: [FakeRPCTransport] = []
+        let client = CodexRPCClient {
+            let pipe = FakeRPCTransport()
             if pipes.isEmpty {
                 pipe.response = { [weak pipe] _, _ in pipe?.onExit?(); return nil }
             }
             pipes.append(pipe)
             return pipe
         }
-        let value = try await client.readCodexUsage()
+        let value = try await client.readUsage()
         #expect(value.remaining == 75)
         #expect(pipes.count == 2)
         #expect(pipes[0].stopped)
@@ -223,15 +184,15 @@ final class RPCTests {
     }
 
     @Test @MainActor func testTimeoutRetriesAreBounded() async {
-        var pipes: [FakeTransport] = []
-        let client = RPCClient(timeout: 0.01) {
-            let pipe = FakeTransport()
+        var pipes: [FakeRPCTransport] = []
+        let client = CodexRPCClient(timeout: 0.01) {
+            let pipe = FakeRPCTransport()
             pipe.response = { _, _ in nil }
             pipes.append(pipe)
             return pipe
         }
         do {
-            _ = try await client.readCodexUsage()
+            _ = try await client.readUsage()
             Issue.record("Expected timeout")
         } catch {
             #expect((error as? ProviderError)?.category == .connection)
@@ -243,15 +204,15 @@ final class RPCTests {
 
     @Test @MainActor func testMissingLoginAndUnsupportedMethod() async {
         for expected in [ErrorCategory.auth, .update] {
-            let pipe = FakeTransport()
+            let pipe = FakeRPCTransport()
             pipe.response = { method, id in
                 if method == "initialize" { return ["id": id, "result": [:]] }
                 if expected == .update { return ["id": id, "error": ["code": -32601]] }
                 return ["id": id, "result": ["account": NSNull()]]
             }
-            let client = RPCClient { pipe }
+            let client = CodexRPCClient { pipe }
             do {
-                _ = try await client.readCodexUsage()
+                _ = try await client.readUsage()
                 Issue.record("Expected failure")
             } catch {
                 #expect((error as? ProviderError)?.category == expected)
@@ -261,10 +222,10 @@ final class RPCTests {
     }
 
     @Test @MainActor func testShutdownReleasesPendingRequest() async {
-        let pipe = FakeTransport()
+        let pipe = FakeRPCTransport()
         pipe.response = { _, _ in nil }
-        let client = RPCClient(timeout: 1) { pipe }
-        let task = Task { try await client.readCodexUsage() }
+        let client = CodexRPCClient(timeout: 1) { pipe }
+        let task = Task { try await client.readUsage() }
         await Task.yield()
         task.cancel()
         client.shutdown()
@@ -273,14 +234,14 @@ final class RPCTests {
     }
 
     @Test @MainActor func testMalformedWireResponse() async {
-        let pipe = FakeTransport()
+        let pipe = FakeRPCTransport()
         pipe.response = { [weak pipe] _, _ in
             pipe?.onData?(Data("not-json\n".utf8))
             return nil
         }
-        let client = RPCClient { pipe }
+        let client = CodexRPCClient { pipe }
         do {
-            _ = try await client.readCodexUsage()
+            _ = try await client.readUsage()
             Issue.record("Expected malformed response")
         } catch {
             #expect((error as? ProviderError)?.category == .parse)
@@ -289,11 +250,11 @@ final class RPCTests {
     }
 
     @Test @MainActor func testMissingExecutable() async {
-        let client = RPCClient {
+        let client = CodexRPCClient {
             throw ProviderError.missingExecutable(serviceName: "Codex", executableName: "codex")
         }
         do {
-            _ = try await client.readCodexUsage()
+            _ = try await client.readUsage()
             Issue.record("Expected missing executable")
         } catch {
             #expect((error as? ProviderError)?.category == .setup)
@@ -305,10 +266,9 @@ final class RPCTests {
     @MainActor func testLiveUsageWhenExplicitlyEnabled() async throws {
         guard ProcessInfo.processInfo.environment["CODEX_METER_LIVE_TEST"] == "1" else { return }
         let executable = try #require(ExecutableLocator.locate(name: "codex"))
-        let client = RPCClient { ProcessTransport(executable: executable) }
+        let client = CodexRPCClient { ProcessTransport(executable: executable, arguments: ["app-server"]) }
         defer { client.shutdown() }
-        let usage = try await client.readCodexUsage()
+        let usage = try await client.readUsage()
         #expect(usage.core != nil)
-        // Deliberately do not print account data or balances.
     }
 }

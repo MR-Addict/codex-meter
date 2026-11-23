@@ -145,10 +145,7 @@ public struct CodexUsage: Decodable, Sendable {
         case "edu", "education":
             return "Edu"
         default:
-            return trimmed
-                .replacingOccurrences(of: "_", with: " ")
-                .replacingOccurrences(of: "-", with: " ")
-                .capitalized
+            return JSONParsing.humanizeIdentifier(trimmed)
         }
     }
 
@@ -178,7 +175,6 @@ public struct CodexUsage: Decodable, Sendable {
                 QuotaSection(
                     id: "codex-core",
                     title: nil,
-                    layout: .compact,
                     items: items,
                     emptyMessage: emptyText,
                     isCollapsible: false,
@@ -190,7 +186,6 @@ public struct CodexUsage: Decodable, Sendable {
                 QuotaSection(
                     id: "codex-core-empty",
                     title: nil,
-                    layout: .compact,
                     items: [],
                     emptyMessage: ordinaryUsageAllowed == false
                         ? "Codex not included in current plan"
@@ -201,8 +196,7 @@ public struct CodexUsage: Decodable, Sendable {
             )
         }
 
-        for entry in additionalBuckets {
-            let (key, bucket) = entry
+        for (key, bucket) in additionalBuckets {
             let items = bucket.windows.enumerated().map { winIndex, window in
                 QuotaItem(
                     id: "codex-extra-\(key)-\(winIndex)",
@@ -215,7 +209,6 @@ public struct CodexUsage: Decodable, Sendable {
                 QuotaSection(
                     id: "codex-bucket-\(key)",
                     title: bucket.limitName ?? key,
-                    layout: .compact,
                     items: items,
                     footnote: bucket.credits.map { "Credits \($0.display)" },
                     emptyMessage: items.isEmpty ? "Allowance unavailable" : nil,
@@ -246,6 +239,7 @@ public struct CodexUsage: Decodable, Sendable {
             planName: planName,
             headline: headline,
             sections: sections,
+            collapsibleSectionTitle: "Other allowances",
             badges: badges
         )
     }
@@ -265,7 +259,7 @@ public struct CodexWindow: Decodable, Sendable {
     public let windowDurationMins: Int?
     public let resetsAt: Double?
 
-    public var remaining: Int { Int(floor(max(0, min(100, 100 - usedPercent)))) }
+    public var remaining: Int { JSONParsing.clampedPercent(100 - usedPercent) }
 
     public var label: String {
         guard let minutes = windowDurationMins, minutes > 0 else { return "Allowance" }

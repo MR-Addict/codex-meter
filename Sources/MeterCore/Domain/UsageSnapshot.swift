@@ -29,9 +29,7 @@ public enum ResetDisplayPolicy: Equatable, Sendable {
         switch self {
         case .at(let date):
             return ResetFormatter.compactFormat(resetsAt: date, now: now)
-        case .unavailable:
-            return nil
-        case .none:
+        case .unavailable, .none:
             return nil
         }
     }
@@ -98,14 +96,6 @@ public struct HeadlineMetric: Equatable, Sendable {
     }
 }
 
-/// Presentation style for a quota section.
-public enum QuotaSectionLayout: String, Equatable, Sendable {
-    /// Prominent card per quota item.
-    case cards
-    /// Compact stacked rows inside a single card.
-    case compact
-}
-
 /// A single quota item (time window, model limit, or feature bucket).
 public struct QuotaItem: Identifiable, Equatable, Sendable {
     public let id: String
@@ -140,9 +130,7 @@ public struct QuotaItem: Identifiable, Equatable, Sendable {
 public struct QuotaSection: Identifiable, Equatable, Sendable {
     public let id: String
     public let title: String?
-    public let subtitle: String?
     public let detailText: String?
-    public let layout: QuotaSectionLayout
     public let items: [QuotaItem]
     public let footnote: String?
     public let emptyMessage: String?
@@ -152,9 +140,7 @@ public struct QuotaSection: Identifiable, Equatable, Sendable {
     public init(
         id: String,
         title: String? = nil,
-        subtitle: String? = nil,
         detailText: String? = nil,
-        layout: QuotaSectionLayout = .compact,
         items: [QuotaItem],
         footnote: String? = nil,
         emptyMessage: String? = nil,
@@ -163,9 +149,7 @@ public struct QuotaSection: Identifiable, Equatable, Sendable {
     ) {
         self.id = id
         self.title = title
-        self.subtitle = subtitle
         self.detailText = detailText
-        self.layout = layout
         self.items = items
         self.footnote = footnote
         self.emptyMessage = emptyMessage
@@ -182,7 +166,7 @@ public struct QuotaSection: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Small metadata chip rendered below quota sections (credits, reset credits, plan tier, etc.).
+/// Small metadata chip rendered below quota sections (credits, reset credits, overage, etc.).
 public struct UsageBadge: Identifiable, Equatable, Sendable {
     public let id: String
     public let symbol: String
@@ -203,6 +187,7 @@ public struct UsageSnapshot: Equatable, Sendable {
     public let planName: String?
     public let headline: HeadlineMetric?
     public let sections: [QuotaSection]
+    public let collapsibleSectionTitle: String?
     public let badges: [UsageBadge]
 
     public init(
@@ -212,6 +197,7 @@ public struct UsageSnapshot: Equatable, Sendable {
         planName: String? = nil,
         headline: HeadlineMetric?,
         sections: [QuotaSection],
+        collapsibleSectionTitle: String? = nil,
         badges: [UsageBadge] = []
     ) {
         self.serviceID = serviceID
@@ -220,6 +206,7 @@ public struct UsageSnapshot: Equatable, Sendable {
         self.planName = planName
         self.headline = headline
         self.sections = sections
+        self.collapsibleSectionTitle = collapsibleSectionTitle
         self.badges = badges
     }
 

@@ -182,7 +182,6 @@ public struct AntigravityUsage: Equatable, Sendable {
                 id: "agy-group-\(group.id)",
                 title: Self.displayGroupName(group.name),
                 detailText: Self.displayGroupDetail(group.description),
-                layout: .compact,
                 items: items,
                 emptyMessage: items.isEmpty ? "No model limits reported" : nil,
                 isCollapsible: isSecondary,
@@ -202,6 +201,7 @@ public struct AntigravityUsage: Equatable, Sendable {
             planName: planName,
             headline: headline,
             sections: sections,
+            collapsibleSectionTitle: "Other models",
             badges: badges
         )
     }
@@ -211,7 +211,9 @@ public struct AntigravityUsage: Equatable, Sendable {
     /// 2. `statusLine` JSON (`quota` map)
     /// 3. Per-model arrays (`models` / `model_limits` / `buckets` / `clientModelConfigs`)
     public static func decode(_ data: Data, now: Date = Date()) throws -> AntigravityUsage {
-        let rootObject = try parseJSONObject(from: data)
+        guard let rootObject = JSONParsing.extractJSONObject(from: data) else {
+            throw ProviderError.malformed(serviceName: ServiceDescriptor.antigravity.name)
+        }
         let payload = unwrapEnvelope(rootObject)
 
         let planLabel = extractPlanLabel(from: payload) ?? extractPlanLabel(from: rootObject)
@@ -261,28 +263,6 @@ public struct AntigravityUsage: Equatable, Sendable {
     }
 
     // MARK: - Parsing helpers
-
-    private static func parseJSONObject(from data: Data) throws -> [String: Any] {
-        if let direct = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return direct
-        }
-        // Handle CLI output that contains ANSI sequences or leading/trailing log lines around a JSON object.
-        let cleaned = stripANSI(String(decoding: data, as: UTF8.self)).trimmingCharacters(in: .whitespacesAndNewlines)
-        if let cleanedData = cleaned.data(using: .utf8),
-           let parsed = try? JSONSerialization.jsonObject(with: cleanedData) as? [String: Any] {
-            return parsed
-        }
-        if let firstBrace = cleaned.firstIndex(of: "{"),
-           let lastBrace = cleaned.lastIndex(of: "}"),
-           firstBrace < lastBrace {
-            let slice = String(cleaned[firstBrace...lastBrace])
-            if let sliceData = slice.data(using: .utf8),
-               let parsed = try? JSONSerialization.jsonObject(with: sliceData) as? [String: Any] {
-                return parsed
-            }
-        }
-        throw ProviderError.malformed(serviceName: ServiceDescriptor.antigravity.name)
-    }
 
     private static func hasQuotaContainer(_ object: [String: Any]) -> Bool {
         object["groups"] != nil
@@ -391,13 +371,10 @@ public struct AntigravityUsage: Equatable, Sendable {
     }
 
     private static func parseQuotaMap(_ map: [String: Any], now: Date) -> [ModelQuota] {
-        let preferredOrder = ["gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly"]
-        let sortedKeys = map.keys.sorted { lhs, rhs in
-            let leftIdx = preferredOrder.firstIndex(of: lhs) ?? Int.max
-            let rightIdx = preferredOrder.firstIndex(of: rhs) ?? Int.max
-            if leftIdx != rightIdx { return leftIdx < rightIdx }
-            return lhs < rhs
-        }
+        let sortedKeys = JSONParsing.sortedKeys(
+            map.keys,
+            preferredOrder: ["gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly"]
+        )
 
         return sortedKeys.compactMap { key -> ModelQuota? in
             guard let entry = map[key] as? [String: Any] else { return nil }
@@ -465,41 +442,30 @@ public struct AntigravityUsage: Equatable, Sendable {
     }
 
     private static func parseRemainingPercent(from dict: [String: Any]) -> Int? {
-        if let fraction = doubleValue(dict["remaining_fraction"] ?? dict["remainingFraction"]) {
-            let scaled = fraction <= 1.0 && fraction >= 0.0 ? fraction * 100.0 : fraction
-            return Int(floor(max(0, min(100, scaled))))
+        if let fraction = JSONParsing.doubleValue(dict["remaining_fraction"] ?? dict["remainingFraction"]) {
+            return JSONParsing.percentFromFraction(fraction)
         }
-        if let remaining = doubleValue(dict["remaining_percent"] ?? dict["remainingPercent"]) {
-            return Int(floor(max(0, min(100, remaining))))
+        if let remaining = JSONParsing.doubleValue(dict["remaining_percent"] ?? dict["remainingPercent"]) {
+            return JSONParsing.clampedPercent(remaining)
         }
-        if let used = doubleValue(dict["used_percent"] ?? dict["usedPercent"]) {
-            return Int(floor(max(0, min(100, 100.0 - used))))
+        if let used = JSONParsing.doubleValue(dict["used_percent"] ?? dict["usedPercent"]) {
+            return JSONParsing.clampedPercent(100.0 - used)
         }
         return nil
     }
 
     private static func parseResetDate(from dict: [String: Any], now: Date) -> Date? {
         let rawTime = dict["reset_time"] ?? dict["resetTime"] ?? dict["resets_at"] ?? dict["resetsAt"]
-        if let epoch = doubleValue(rawTime), epoch > 0 {
+        if let epoch = JSONParsing.doubleValue(rawTime), epoch > 0 {
             return Date(timeIntervalSince1970: epoch)
         }
-        if let iso = rawTime as? String, !iso.isEmpty {
-            if let parsed = parseISO8601(iso) { return parsed }
+        if let iso = rawTime as? String, !iso.isEmpty, let parsed = JSONParsing.parseISO8601(iso) {
+            return parsed
         }
-        if let seconds = doubleValue(dict["reset_in_seconds"] ?? dict["resetInSeconds"]), seconds > 0 {
+        if let seconds = JSONParsing.doubleValue(dict["reset_in_seconds"] ?? dict["resetInSeconds"]), seconds > 0 {
             return now.addingTimeInterval(seconds)
         }
         return nil
-    }
-
-    private static func parseISO8601(_ string: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: string) { return date }
-
-        let standard = ISO8601DateFormatter()
-        standard.formatOptions = [.withInternetDateTime]
-        return standard.date(from: string)
     }
 
     private static func extractPlanLabel(from dict: [String: Any]) -> String? {
@@ -507,10 +473,10 @@ public struct AntigravityUsage: Equatable, Sendable {
             if let value = dict[key] as? String, !value.isEmpty {
                 return value
             }
-            if let nested = dict[key] as? [String: Any] {
-                if let name = (nested["display_name"] as? String) ?? (nested["name"] as? String), !name.isEmpty {
-                    return name
-                }
+            if let nested = dict[key] as? [String: Any],
+               let name = (nested["display_name"] as? String) ?? (nested["name"] as? String),
+               !name.isEmpty {
+                return name
             }
         }
         if let planStatus = dict["planStatus"] as? [String: Any],
@@ -525,7 +491,7 @@ public struct AntigravityUsage: Equatable, Sendable {
     private static func extractCredits(from dict: [String: Any]) -> String? {
         for key in ["ai_credits", "aiCredits", "availablePromptCredits", "credits"] {
             if let value = dict[key] {
-                if !isBoolean(value), let number = value as? NSNumber {
+                if !JSONParsing.isBoolean(value), let number = value as? NSNumber {
                     return number.stringValue
                 }
                 if let text = value as? String, !text.isEmpty {
@@ -533,7 +499,7 @@ public struct AntigravityUsage: Equatable, Sendable {
                 }
                 if let nested = value as? [String: Any] {
                     if let unlimited = nested["unlimited"] as? Bool, unlimited { return "Unlimited" }
-                    if let remaining = nested["remaining"] as? NSNumber, !isBoolean(remaining) {
+                    if let remaining = nested["remaining"] as? NSNumber, !JSONParsing.isBoolean(remaining) {
                         return remaining.stringValue
                     }
                     if let balance = nested["balance"] as? String, !balance.isEmpty { return balance }
@@ -542,7 +508,7 @@ public struct AntigravityUsage: Equatable, Sendable {
         }
         if let planStatus = dict["planStatus"] as? [String: Any],
            let credits = planStatus["availablePromptCredits"] as? NSNumber,
-           !isBoolean(credits) {
+           !JSONParsing.isBoolean(credits) {
             return credits.stringValue
         }
         return nil
@@ -569,19 +535,8 @@ public struct AntigravityUsage: Equatable, Sendable {
                     return (base, tag)
                 }
             }
-            return (key.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ").capitalized, nil)
+            return (JSONParsing.humanizeIdentifier(key), nil)
         }
-    }
-
-    private static func isBoolean(_ value: Any) -> Bool {
-        guard let number = value as? NSNumber else { return false }
-        return CFGetTypeID(number) == CFBooleanGetTypeID()
-    }
-
-    private static func doubleValue(_ raw: Any?) -> Double? {
-        if let raw, !isBoolean(raw), let num = raw as? NSNumber { return num.doubleValue }
-        if let str = raw as? String { return Double(str) }
-        return nil
     }
 
     private static func displayGroupName(_ raw: String) -> String {
@@ -604,14 +559,5 @@ public struct AntigravityUsage: Equatable, Sendable {
             return models.isEmpty ? nil : models
         }
         return nil
-    }
-
-    private static func stripANSI(_ text: String) -> String {
-        guard text.contains("\u{001B}") else { return text }
-        return text.replacingOccurrences(
-            of: #"\u001B\[[0-9;]*[a-zA-Z]"#,
-            with: "",
-            options: .regularExpression
-        )
     }
 }

@@ -65,27 +65,18 @@ struct RefreshPolicyTests {
     }
 
     @Test @MainActor func shutdownWithoutTaskCancellationNeverReconnects() async throws {
-        let pipe = FakeTransport()
+        let pipe = FakeRPCTransport()
         pipe.response = { _, _ in nil }
         var starts = 0
-        let client = RPCClient(timeout: 1) { starts += 1; return pipe }
-        let task = Task { try await client.readCodexUsage() }
+        let client = CodexRPCClient(timeout: 1) { starts += 1; return pipe }
+        let task = Task { try await client.readUsage() }
         try await waitUntil { !(pipe.methods.isEmpty) }
         client.shutdown()
         do { _ = try await task.value; Issue.record("Expected cancellation") }
         catch { #expect(error is CancellationError) }
         #expect(starts == 1)
-        do { _ = try await client.readCodexUsage(); Issue.record("Stopped client must stay stopped") }
+        do { _ = try await client.readUsage(); Issue.record("Stopped client must stay stopped") }
         catch { #expect(error is CancellationError) }
         #expect(starts == 1)
     }
-}
-
-private struct WaitTimeout: Error {}
-@MainActor private func waitUntil(_ condition: () -> Bool) async throws {
-    for _ in 0..<10_000 {
-        if condition() { return }
-        await Task.yield()
-    }
-    throw WaitTimeout()
 }

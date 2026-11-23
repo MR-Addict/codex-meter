@@ -135,12 +135,12 @@ struct AntigravityUsageTests {
 
         let snapshot = parsed.toSnapshot(fetchedAt: origin)
         #expect(snapshot.serviceID == .antigravity)
+        #expect(snapshot.collapsibleSectionTitle == "Other models")
         #expect(snapshot.accountSubtitle == "Google AI Pro")
         #expect(snapshot.planName == "Pro")
         #expect(snapshot.headline?.remainingPercent == 72)
         #expect(snapshot.headline?.nearestResetAt == origin.addingTimeInterval(3600))
         #expect(snapshot.sections.count == 1)
-        #expect(snapshot.sections[0].layout == .compact)
         #expect(snapshot.sections[0].title == "Model limits")
         #expect(snapshot.sections[0].items.map(\.title) == ["Gemini", "Gemini", "Claude / GPT"])
         #expect(snapshot.sections[0].items.map(\.tag) == ["5-hour", "Weekly", "5-hour"])
@@ -270,16 +270,6 @@ struct AntigravityUsageTests {
                 #expect((error as? ProviderError)?.category == .parse)
             }
         }
-    }
-}
-
-private final class StubCommandRunner: CommandRunning, @unchecked Sendable {
-    let handler: @Sendable (String, [String]) async throws -> CommandOutput
-    init(handler: @escaping @Sendable (String, [String]) async throws -> CommandOutput) {
-        self.handler = handler
-    }
-    func run(executable: String, arguments: [String], timeout: TimeInterval) async throws -> CommandOutput {
-        try await handler(executable, arguments)
     }
 }
 

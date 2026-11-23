@@ -3,29 +3,7 @@ import AppKit
 import MeterCore
 import Combine
 
-@main enum AIMeterApp {
-    @MainActor static func main() {
-        let app = NSApplication.shared
-        let delegate = MeterAppDelegate()
-        app.setActivationPolicy(.accessory)
-        app.delegate = delegate
-        // Keep the delegate alive for the event loop without creating any window scene.
-        withExtendedLifetime(delegate) { app.run() }
-    }
-}
-
-@MainActor final class MeterAppDelegate: NSObject, NSApplicationDelegate {
-    private var controller: StatusController?
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
-        controller = StatusController()
-    }
-    func applicationWillTerminate(_ notification: Notification) { controller?.stop() }
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        false
-    }
-}
-
+/// Owns the macOS menu bar `NSStatusItem`, popover lifecycle, and outside-click / Escape dismissal.
 @MainActor final class StatusController: NSObject, NSPopoverDelegate {
     private let model = MeterModel()
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -33,7 +11,7 @@ import Combine
     private var subscription: AnyCancellable?
     private var monitors: [Any] = []
     private var observers: [NSObjectProtocol] = []
-    private var iconCache: [ServiceIconKind: NSImage] = [:]
+    private var iconCache: [String: NSImage] = [:]
 
     override init() {
         super.init()
@@ -68,7 +46,7 @@ import Combine
         guard let button = item.button else { return }
 
         guard let descriptor = model.activeDescriptor, let state = model.activeState else {
-            button.image = icon(for: .generic)
+            button.image = icon(for: nil)
             button.title = " —"
             if !model.detectedServices.isEmpty {
                 button.setAccessibilityLabel("AI Meter: all services disabled")
@@ -81,7 +59,7 @@ import Combine
         }
 
         let percentage = state.menuBarValue
-        button.image = icon(for: descriptor.iconKind)
+        button.image = icon(for: descriptor.id)
         button.title = " " + percentage + (state.isStale ? " ·" : "")
         button.setAccessibilityLabel("\(descriptor.name) usage: \(percentage)")
 
@@ -167,10 +145,11 @@ import Combine
 
     // MARK: - Template Menu Bar Icons
 
-    private func icon(for kind: ServiceIconKind) -> NSImage {
-        if let cached = iconCache[kind] { return cached }
-        let created = ServiceMenuBarIcon.makeTemplateImage(for: kind)
-        iconCache[kind] = created
+    private func icon(for serviceID: ServiceID?) -> NSImage {
+        let key = serviceID?.rawValue ?? "__generic__"
+        if let cached = iconCache[key] { return cached }
+        let created = ServiceAppearance.resolve(serviceID).makeMenuBarTemplateImage()
+        iconCache[key] = created
         return created
     }
 }
