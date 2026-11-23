@@ -163,7 +163,11 @@ import Darwin
                         detail: "Sign in using ‘codex login’ in Terminal, then refresh. A ChatGPT login is required."
                     )
                 }
-                return try CodexUsage.decode(await request("account/rateLimits/read", params: [:]))
+                let accountPlanType = details["planType"] as? String
+                return try CodexUsage.decode(
+                    await request("account/rateLimits/read", params: [:]),
+                    fallbackPlanType: accountPlanType
+                )
             } catch let error as ProviderError {
                 let shouldRetry = error == .disconnected(serviceName: serviceName)
                     || error == .timeout(serviceName: serviceName)
@@ -249,6 +253,11 @@ import Darwin
                         serviceName: serviceName,
                         command: loginCommand,
                         detail: "Sign in using ‘codex login’ in Terminal, then refresh. A ChatGPT login is required."
+                    )
+                } else if text.contains("upgrade") || text.contains("not included") || text.contains("subscription") || text.contains("free plan") || text.contains("plan") {
+                    failure = ProviderError.serviceUnavailable(
+                        serviceName: serviceName,
+                        detail: "\(serviceName) usage is not included in your current ChatGPT plan."
                     )
                 } else {
                     failure = ProviderError.serviceUnavailable(serviceName: serviceName)

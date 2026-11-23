@@ -200,6 +200,7 @@ public struct UsageSnapshot: Equatable, Sendable {
     public let serviceID: ServiceID
     public let fetchedAt: Date
     public let accountSubtitle: String?
+    public let planName: String?
     public let headline: HeadlineMetric?
     public let sections: [QuotaSection]
     public let badges: [UsageBadge]
@@ -208,6 +209,7 @@ public struct UsageSnapshot: Equatable, Sendable {
         serviceID: ServiceID,
         fetchedAt: Date = Date(),
         accountSubtitle: String? = nil,
+        planName: String? = nil,
         headline: HeadlineMetric?,
         sections: [QuotaSection],
         badges: [UsageBadge] = []
@@ -215,6 +217,7 @@ public struct UsageSnapshot: Equatable, Sendable {
         self.serviceID = serviceID
         self.fetchedAt = fetchedAt
         self.accountSubtitle = accountSubtitle
+        self.planName = planName
         self.headline = headline
         self.sections = sections
         self.badges = badges

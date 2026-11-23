@@ -87,6 +87,18 @@ public struct CopilotUsage: Equatable, Sendable {
         return resetsAt
     }
 
+    /// Concise subscription tier label (`"Free"`, `"Pro"`, `"Pro+"`, `"Business"`, `"Enterprise"`, etc.).
+    public var planName: String? {
+        guard let planLabel else { return nil }
+        let trimmed = planLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.lowercased().hasPrefix("copilot ") {
+            let suffix = String(trimmed.dropFirst("copilot ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return suffix.isEmpty ? trimmed : suffix
+        }
+        return trimmed
+    }
+
     public func toSnapshot(fetchedAt: Date = Date()) -> UsageSnapshot {
         let finite = finiteBuckets
         let unlimited = unlimitedBuckets
@@ -215,6 +227,7 @@ public struct CopilotUsage: Equatable, Sendable {
             serviceID: .copilot,
             fetchedAt: fetchedAt,
             accountSubtitle: planLabel,
+            planName: planName,
             headline: headline,
             sections: sections,
             badges: badges

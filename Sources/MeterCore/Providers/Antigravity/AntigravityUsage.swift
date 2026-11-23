@@ -74,6 +74,64 @@ public struct AntigravityUsage: Equatable, Sendable {
         activeModels.compactMap(\.resetsAt).min()
     }
 
+    /// Concise subscription tier label (`"Free"`, `"Pro"`, `"Ultra"`, etc.).
+    /// Prefers explicit plan metadata when provided by `agy` / `statusLine` JSON;
+    /// otherwise uses high-confidence structural signals from `/usage` groups.
+    public var planName: String? {
+        if let explicit = Self.normalizePlanName(planLabel) {
+            return explicit
+        }
+
+        // High-confidence Pro signal: dedicated paid Pro Argon quota description.
+        if groups.contains(where: { ($0.description ?? "").lowercased().contains("for paid pro plans") }) {
+            return "Pro"
+        }
+
+        // High-confidence Free signal: active window-based buckets exist, all are weekly-only (no 5-hour window).
+        let active = activeModels
+        if !active.isEmpty {
+            let hasWeekly = active.contains {
+                $0.title.caseInsensitiveCompare("Weekly") == .orderedSame
+                    || $0.tag?.caseInsensitiveCompare("Weekly") == .orderedSame
+            }
+            let hasFiveHour = active.contains {
+                $0.title.caseInsensitiveCompare("5-hour") == .orderedSame
+                    || $0.tag?.caseInsensitiveCompare("5-hour") == .orderedSame
+            }
+            if hasWeekly && !hasFiveHour {
+                return "Free"
+            }
+        }
+
+        return nil
+    }
+
+    public static func normalizePlanName(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let lower = trimmed.lowercased()
+        switch lower {
+        case "free", "google ai free", "ai free", "individual", "individual free":
+            return "Free"
+        case "pro", "google ai pro", "ai pro":
+            return "Pro"
+        case "ultra", "google ai ultra", "ai ultra":
+            return "Ultra"
+        case "enterprise", "google ai enterprise":
+            return "Enterprise"
+        case "business", "google ai business":
+            return "Business"
+        default:
+            if lower.hasPrefix("google ai ") {
+                let suffix = String(trimmed.dropFirst("google ai ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                return suffix.isEmpty ? trimmed : suffix
+            }
+            return trimmed
+        }
+    }
+
     public func toSnapshot(fetchedAt: Date = Date()) -> UsageSnapshot {
         let active = activeModels
         let lowest = lowestRemaining
@@ -141,6 +199,7 @@ public struct AntigravityUsage: Equatable, Sendable {
             serviceID: .antigravity,
             fetchedAt: fetchedAt,
             accountSubtitle: planLabel,
+            planName: planName,
             headline: headline,
             sections: sections,
             badges: badges
@@ -279,8 +338,13 @@ public struct AntigravityUsage: Equatable, Sendable {
                 let rawWindow = (entry["window"] as? String)?.lowercased()
                 let rawName = (entry["name"] as? String) ?? (entry["display_name"] as? String)
                 let disabled = (entry["disabled"] as? Bool) ?? false
-                let remaining = parseRemainingPercent(from: entry)
+                var remaining = parseRemainingPercent(from: entry)
                 let resetsAt = parseResetDate(from: entry, now: now)
+                // Proto3 JSON can omit `remaining_fraction: 0.0` when exhausted;
+                // preserve the bucket as 0% when a reset timestamp is reported.
+                if remaining == nil && !disabled && resetsAt != nil {
+                    remaining = 0
+                }
 
                 guard remaining != nil || disabled else { return nil }
 
@@ -339,8 +403,11 @@ public struct AntigravityUsage: Equatable, Sendable {
             guard let entry = map[key] as? [String: Any] else { return nil }
             let (title, tag) = normalizeBucketKey(key)
             let disabled = (entry["disabled"] as? Bool) ?? false
-            let remaining = parseRemainingPercent(from: entry)
+            var remaining = parseRemainingPercent(from: entry)
             let resetsAt = parseResetDate(from: entry, now: now)
+            if remaining == nil && !disabled && resetsAt != nil {
+                remaining = 0
+            }
             return ModelQuota(
                 id: key,
                 title: (entry["display_name"] as? String) ?? (entry["label"] as? String) ?? title,
@@ -378,8 +445,11 @@ public struct AntigravityUsage: Equatable, Sendable {
                 ?? normalizeBucketKey(rawID).1
 
             let disabled = (entry["disabled"] as? Bool) ?? (quotaObj["disabled"] as? Bool) ?? false
-            let remaining = parseRemainingPercent(from: quotaObj) ?? parseRemainingPercent(from: entry)
+            var remaining = parseRemainingPercent(from: quotaObj) ?? parseRemainingPercent(from: entry)
             let resetsAt = parseResetDate(from: quotaObj, now: now) ?? parseResetDate(from: entry, now: now)
+            if remaining == nil && !disabled && resetsAt != nil {
+                remaining = 0
+            }
 
             guard remaining != nil || disabled else { return nil }
 

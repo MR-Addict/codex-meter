@@ -72,8 +72,14 @@ struct MeterView: View {
             ServiceBadgeView(kind: activeIconKind, size: 26)
 
             VStack(alignment: .leading, spacing: 0.5) {
-                Text(model.activeDescriptor?.name ?? "AI Meter")
-                    .font(.system(size: 13, weight: .semibold))
+                HStack(spacing: 5.5) {
+                    Text(model.activeDescriptor?.name ?? "AI Meter")
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    if let plan = model.activeState?.snapshot?.planName {
+                        planPill(plan)
+                    }
+                }
                 Text(headerSubtitle)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -113,9 +119,30 @@ struct MeterView: View {
             if state.error != nil {
                 return "Showing cached usage"
             }
-            return snapshot.accountSubtitle ?? descriptor.defaultSubtitle
+            if let subtitle = snapshot.accountSubtitle, !subtitle.isEmpty {
+                if let plan = snapshot.planName,
+                   subtitle.lowercased().contains(plan.lowercased()) {
+                    return descriptor.defaultSubtitle
+                }
+                return subtitle
+            }
+            return descriptor.defaultSubtitle
         }
         return "Connecting…"
+    }
+
+    private func planPill(_ plan: String) -> some View {
+        let isFree = plan.caseInsensitiveCompare("Free") == .orderedSame
+        return Text(plan)
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(isFree ? Color.secondary : activeAccent)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(
+                Capsule().fill(isFree ? Color.primary.opacity(0.08) : activeAccent.opacity(0.14))
+            )
+            .lineLimit(1)
+            .accessibilityLabel("Plan: \(plan)")
     }
 
     // MARK: - Service Switcher (only shown when 2+ enabled services detected)
@@ -538,9 +565,10 @@ struct MeterView: View {
         let statusColor: Color = !isEnabled
             ? Color.secondary.opacity(0.35)
             : (isDetected ? Color(red: 0.13, green: 0.68, blue: 0.43) : Color.secondary.opacity(0.45))
+        let planSuffix = model.state(for: service.id)?.snapshot?.planName.map { " · \($0)" } ?? ""
         let statusLabel: String = !isEnabled
             ? "Disabled"
-            : (isDetected ? "Ready" : "Not found")
+            : (isDetected ? "Ready\(planSuffix)" : "Not found")
         let sourceText: String = !isEnabled
             ? (model.displaySource(for: service.id) ?? "Disabled in Settings")
             : (model.displaySource(for: service.id) ?? "Not found · \(service.descriptor.requirementLabel)")

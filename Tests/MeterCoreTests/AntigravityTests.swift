@@ -136,6 +136,7 @@ struct AntigravityUsageTests {
         let snapshot = parsed.toSnapshot(fetchedAt: origin)
         #expect(snapshot.serviceID == .antigravity)
         #expect(snapshot.accountSubtitle == "Google AI Pro")
+        #expect(snapshot.planName == "Pro")
         #expect(snapshot.headline?.remainingPercent == 72)
         #expect(snapshot.headline?.nearestResetAt == origin.addingTimeInterval(3600))
         #expect(snapshot.sections.count == 1)
@@ -167,6 +168,7 @@ struct AntigravityUsageTests {
         let parsed = try AntigravityUsage.decode(Data(json.utf8), now: origin)
         let snapshot = parsed.toSnapshot(fetchedAt: origin)
         #expect(snapshot.accountSubtitle == "Google AI Ultra")
+        #expect(snapshot.planName == "Ultra")
         #expect(snapshot.headline?.remainingPercent == 60)
         #expect(snapshot.headline?.nearestResetAt == nil)
         #expect(snapshot.headline?.detailText(now: origin) == "3 model limits tracked")
@@ -182,6 +184,81 @@ struct AntigravityUsageTests {
         let parsed = try AntigravityUsage.decode(Data(raw.utf8), now: origin)
         #expect(parsed.lowestRemaining == 55)
         #expect(parsed.nearestResetAt != nil)
+    }
+
+    @Test func decodesFreeWeeklyOnlyAndProto3ZeroExhaustedBucketAndProInference() throws {
+        // 1. Antigravity Free tier: weekly-only buckets, plus an exhausted bucket where proto3 omits remaining_fraction: 0.0
+        let freeJSON = """
+        {
+          "command": {
+            "name": "usage",
+            "data": {
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "buckets": [
+                    {
+                      "id": "gemini-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "reset_time": "2026-11-30T06:47:24Z"
+                    }
+                  ]
+                },
+                {
+                  "name": "Claude and GPT models",
+                  "buckets": [
+                    {
+                      "id": "3p-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 0.45,
+                      "reset_time": "2026-11-30T08:00:00Z"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """
+        let freeParsed = try AntigravityUsage.decode(Data(freeJSON.utf8), now: origin)
+        #expect(freeParsed.planName == "Free")
+        #expect(freeParsed.lowestRemaining == 0)
+        let freeSnapshot = freeParsed.toSnapshot(fetchedAt: origin)
+        #expect(freeSnapshot.planName == "Free")
+        #expect(freeSnapshot.headline?.remainingPercent == 0)
+        #expect(freeSnapshot.sections[0].title == "Gemini Models")
+        #expect(freeSnapshot.sections[0].items.map(\.remainingPercent) == [0])
+
+        // 2. Paid Pro tier inferred from live Argon Pro description when no explicit plan_name is emitted
+        let proJSON = """
+        {
+          "command": {
+            "name": "usage",
+            "data": {
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "buckets": [
+                    { "id": "gemini-5h", "window": "5h", "remaining_fraction": 0.72, "reset_time": "2026-11-23T11:47:24Z" },
+                    { "id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.92, "reset_time": "2026-11-30T06:47:24Z" }
+                  ]
+                },
+                {
+                  "name": "Gemini 4 Argon",
+                  "description": "For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra plans.",
+                  "buckets": [
+                    { "id": "gemini-argon-wtu-weekly", "window": "weekly", "remaining_fraction": 1, "reset_time": "2026-11-30T08:41:24Z" }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """
+        let proSnapshot = try AntigravityUsage.decode(Data(proJSON.utf8), now: origin).toSnapshot(fetchedAt: origin)
+        #expect(proSnapshot.planName == "Pro")
     }
 
     @Test func rejectsUnrecognizedOrMalformedPayloads() {

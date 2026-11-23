@@ -5,12 +5,84 @@ public struct CodexUsage: Decodable, Sendable {
     public let rateLimits: CodexBucket?
     public let rateLimitsByLimitId: [String: CodexBucket]?
     public let rateLimitResetCredits: CodexResetCredits?
+    public let ordinaryUsageAllowed: Bool?
+    public let rateLimitReachedType: String?
+    public let fallbackPlanType: String?
 
-    public var core: CodexBucket? { rateLimitsByLimitId?["codex"] ?? rateLimits }
+    private enum CodingKeys: String, CodingKey {
+        case rateLimits
+        case rateLimitsByLimitId
+        case rateLimitResetCredits
+        case ordinaryUsageAllowed
+        case rateLimitReachedType
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.rateLimits = try container.decodeIfPresent(CodexBucket.self, forKey: .rateLimits)
+        self.rateLimitsByLimitId = try container.decodeIfPresent([String: CodexBucket].self, forKey: .rateLimitsByLimitId)
+        self.rateLimitResetCredits = try container.decodeIfPresent(CodexResetCredits.self, forKey: .rateLimitResetCredits)
+        self.ordinaryUsageAllowed = try container.decodeIfPresent(Bool.self, forKey: .ordinaryUsageAllowed)
+        self.rateLimitReachedType = try container.decodeIfPresent(String.self, forKey: .rateLimitReachedType)
+        self.fallbackPlanType = nil
+    }
+
+    private init(
+        rateLimits: CodexBucket?,
+        rateLimitsByLimitId: [String: CodexBucket]?,
+        rateLimitResetCredits: CodexResetCredits?,
+        ordinaryUsageAllowed: Bool?,
+        rateLimitReachedType: String?,
+        fallbackPlanType: String?
+    ) {
+        self.rateLimits = rateLimits
+        self.rateLimitsByLimitId = rateLimitsByLimitId
+        self.rateLimitResetCredits = rateLimitResetCredits
+        self.ordinaryUsageAllowed = ordinaryUsageAllowed
+        self.rateLimitReachedType = rateLimitReachedType
+        self.fallbackPlanType = fallbackPlanType
+    }
+
+    private var coreEntry: (key: String?, bucket: CodexBucket)? {
+        if let codexBucket = rateLimitsByLimitId?["codex"] {
+            return ("codex", codexBucket)
+        }
+        if let rateLimits {
+            return (nil, rateLimits)
+        }
+        // Fallback for plans (e.g. Free or model-specific tiers) where limits are keyed
+        // under a non-"codex" limit ID without a top-level `rateLimits` object.
+        if let byId = rateLimitsByLimitId {
+            let sorted = byId.sorted { $0.key < $1.key }
+            if let firstWithWindows = sorted.first(where: { !$0.value.windows.isEmpty }) {
+                return (firstWithWindows.key, firstWithWindows.value)
+            }
+            if let first = sorted.first {
+                return (first.key, first.value)
+            }
+        }
+        return nil
+    }
+
+    public var core: CodexBucket? { coreEntry?.bucket }
     public var remaining: Int? { core?.windows.map(\.remaining).min() }
 
+    public var rawPlanType: String? {
+        core?.planType
+            ?? rateLimits?.planType
+            ?? rateLimitsByLimitId?.values.compactMap(\.planType).first
+            ?? fallbackPlanType
+    }
+
+    public var planName: String? {
+        Self.normalizePlanName(rawPlanType)
+    }
+
     public var additionalBuckets: [(String, CodexBucket)] {
-        (rateLimitsByLimitId ?? [:]).filter { $0.key != "codex" }.sorted { $0.key < $1.key }
+        let excludedKey = coreEntry?.key ?? "codex"
+        return (rateLimitsByLimitId ?? [:])
+            .filter { $0.key != excludedKey }
+            .sorted { $0.key < $1.key }
     }
 
     /// The soonest reset across every allowance currently reported.
@@ -26,17 +98,58 @@ public struct CodexUsage: Decodable, Sendable {
         nearestReset?.resetText(now: now)
     }
 
-    public static func decode(_ data: Data) throws -> CodexUsage {
-        let result: CodexUsage
+    public static func decode(_ data: Data, fallbackPlanType: String? = nil) throws -> CodexUsage {
+        let decoded: CodexUsage
         do {
-            result = try JSONDecoder().decode(CodexUsage.self, from: data)
+            decoded = try JSONDecoder().decode(CodexUsage.self, from: data)
         } catch {
             throw ProviderError.malformed(serviceName: ServiceDescriptor.codex.name)
         }
-        guard result.rateLimits != nil || result.rateLimitsByLimitId != nil else {
+        guard decoded.rateLimits != nil || decoded.rateLimitsByLimitId != nil else {
             throw ProviderError.malformed(serviceName: ServiceDescriptor.codex.name)
         }
-        return result
+        guard let fallbackPlanType, !fallbackPlanType.isEmpty else {
+            return decoded
+        }
+        return CodexUsage(
+            rateLimits: decoded.rateLimits,
+            rateLimitsByLimitId: decoded.rateLimitsByLimitId,
+            rateLimitResetCredits: decoded.rateLimitResetCredits,
+            ordinaryUsageAllowed: decoded.ordinaryUsageAllowed,
+            rateLimitReachedType: decoded.rateLimitReachedType,
+            fallbackPlanType: fallbackPlanType
+        )
+    }
+
+    public static func normalizePlanName(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        switch trimmed.lowercased() {
+        case "free":
+            return "Free"
+        case "go":
+            return "Go"
+        case "plus":
+            return "Plus"
+        case "prolite", "pro_lite", "pro-lite":
+            return "Pro Lite"
+        case "pro":
+            return "Pro"
+        case "team":
+            return "Team"
+        case "business":
+            return "Business"
+        case "enterprise":
+            return "Enterprise"
+        case "edu", "education":
+            return "Edu"
+        default:
+            return trimmed
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "-", with: " ")
+                .capitalized
+        }
     }
 
     /// Converts Codex's wire format into the generic `UsageSnapshot`.
@@ -58,13 +171,16 @@ public struct CodexUsage: Decodable, Sendable {
                     resetPolicy: window.resetsAt.map { .at(Date(timeIntervalSince1970: $0)) } ?? .unavailable
                 )
             }
+            let emptyText: String? = items.isEmpty
+                ? (ordinaryUsageAllowed == false ? "Codex not included in current plan" : "Allowance unavailable")
+                : nil
             sections.append(
                 QuotaSection(
                     id: "codex-core",
                     title: nil,
                     layout: .compact,
                     items: items,
-                    emptyMessage: items.isEmpty ? "Allowance unavailable" : nil,
+                    emptyMessage: emptyText,
                     isCollapsible: false,
                     isExpandedByDefault: true
                 )
@@ -76,7 +192,9 @@ public struct CodexUsage: Decodable, Sendable {
                     title: nil,
                     layout: .compact,
                     items: [],
-                    emptyMessage: "No Codex allowance reported",
+                    emptyMessage: ordinaryUsageAllowed == false
+                        ? "Codex not included in current plan"
+                        : "No Codex allowance reported",
                     isCollapsible: false,
                     isExpandedByDefault: true
                 )
@@ -125,6 +243,7 @@ public struct CodexUsage: Decodable, Sendable {
             serviceID: .codex,
             fetchedAt: fetchedAt,
             accountSubtitle: nil,
+            planName: planName,
             headline: headline,
             sections: sections,
             badges: badges
@@ -134,6 +253,7 @@ public struct CodexUsage: Decodable, Sendable {
 
 public struct CodexBucket: Decodable, Sendable {
     public let limitName: String?
+    public let planType: String?
     public let primary: CodexWindow?
     public let secondary: CodexWindow?
     public let credits: CodexCredits?

@@ -46,6 +46,7 @@ struct CopilotUsageTests {
         let snapshot = parsed.toSnapshot(fetchedAt: origin)
         #expect(snapshot.serviceID == .copilot)
         #expect(snapshot.accountSubtitle == "Copilot Pro")
+        #expect(snapshot.planName == "Pro")
         #expect(snapshot.headline?.title == "Premium requests")
         #expect(snapshot.headline?.remainingPercent == 82)
         #expect(snapshot.headline?.nearestResetAt != nil)
@@ -118,6 +119,7 @@ struct CopilotUsageTests {
 
         let snapshot = parsed.toSnapshot(fetchedAt: origin)
         #expect(snapshot.accountSubtitle == "Copilot Free")
+        #expect(snapshot.planName == "Free")
         #expect(snapshot.headline?.title == "Lowest quota")
         #expect(snapshot.headline?.remainingPercent == 30)
         #expect(snapshot.sections[0].items.map(\.title) == ["Chat", "Completions"])
@@ -172,6 +174,7 @@ struct CopilotUsageTests {
 
         let snapshot = parsed.toSnapshot(fetchedAt: origin)
         #expect(snapshot.accountSubtitle == "Copilot Free")
+        #expect(snapshot.planName == "Free")
         #expect(snapshot.headline?.title == "Lowest quota")
         #expect(snapshot.headline?.remainingPercent == 17)
         #expect(snapshot.sections[0].items.map(\.title) == ["Chat", "Completions"])

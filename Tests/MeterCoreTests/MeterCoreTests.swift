@@ -82,6 +82,44 @@ final class CodexUsageTests {
         state.succeed(try parse(#"{"rateLimits":{}}"#).toSnapshot())
         #expect(state.error == nil)
     }
+
+    @Test func testPlanTypeNormalizationAndFreePlanEdgeCases() throws {
+        // Real-world prolite single-window payload
+        let prolite = try parse(#"{"ordinaryUsageAllowed":true,"rateLimits":{"primary":{"usedPercent":1,"windowDurationMins":10080,"resetsAt":1796007500},"secondary":null,"planType":"prolite"}}"#)
+        #expect(prolite.planName == "Pro Lite")
+        #expect(prolite.toSnapshot().planName == "Pro Lite")
+        #expect(prolite.remaining == 99)
+
+        // All standard & unknown plan types
+        #expect(CodexUsage.normalizePlanName("free") == "Free")
+        #expect(CodexUsage.normalizePlanName("go") == "Go")
+        #expect(CodexUsage.normalizePlanName("plus") == "Plus")
+        #expect(CodexUsage.normalizePlanName("pro") == "Pro")
+        #expect(CodexUsage.normalizePlanName("team") == "Team")
+        #expect(CodexUsage.normalizePlanName("business") == "Business")
+        #expect(CodexUsage.normalizePlanName("enterprise") == "Enterprise")
+        #expect(CodexUsage.normalizePlanName("custom_tier") == "Custom Tier")
+
+        // Free plan fallback when `rateLimits` is omitted and limits live under a non-"codex" bucket
+        let freeScoped = try parse(#"{"rateLimitsByLimitId":{"codex_free":{"planType":"free","primary":{"usedPercent":40,"windowDurationMins":10080,"resetsAt":9000}}}}"#)
+        #expect(freeScoped.planName == "Free")
+        #expect(freeScoped.remaining == 60)
+        #expect(freeScoped.additionalBuckets.isEmpty)
+        let freeSnapshot = freeScoped.toSnapshot()
+        #expect(freeSnapshot.planName == "Free")
+        #expect(freeSnapshot.headline?.remainingPercent == 60)
+        #expect(freeSnapshot.sections.count == 1)
+        #expect(freeSnapshot.sections[0].items.map(\.title) == ["Weekly"])
+
+        // Free plan with ordinaryUsageAllowed == false and no windows
+        let freeDisallowed = try CodexUsage.decode(
+            Data(#"{"ordinaryUsageAllowed":false,"rateLimits":{}}"#.utf8),
+            fallbackPlanType: "free"
+        )
+        let disallowedSnapshot = freeDisallowed.toSnapshot()
+        #expect(disallowedSnapshot.planName == "Free")
+        #expect(disallowedSnapshot.sections[0].emptyMessage == "Codex not included in current plan")
+    }
 }
 
 @MainActor final class FakeTransport: RPCTransport {
@@ -130,6 +168,41 @@ final class RPCTests {
         #expect(pipe.methods == ["initialize", "initialized", "account/read", "account/rateLimits/read", "account/read", "account/rateLimits/read"])
         client.shutdown()
         #expect(pipe.stopped)
+    }
+
+    @Test @MainActor func testAccountPlanTypeFallbackAndPlanRestrictionError() async throws {
+        let pipe = FakeTransport()
+        pipe.response = { method, id in
+            switch method {
+            case "initialize": return ["id": id, "result": [:]]
+            case "account/read": return ["id": id, "result": ["account": ["type": "chatgpt", "planType": "free"]]]
+            case "account/rateLimits/read": return ["id": id, "result": ["rateLimits": ["primary": ["usedPercent": 20, "windowDurationMins": 10080]]]]
+            default: return ["id": id, "result": [:]]
+            }
+        }
+        let client = RPCClient { pipe }
+        let usage = try await client.readCodexUsage()
+        #expect(usage.planName == "Free")
+        #expect(usage.remaining == 80)
+        client.shutdown()
+
+        let restrictedPipe = FakeTransport()
+        restrictedPipe.response = { method, id in
+            switch method {
+            case "initialize": return ["id": id, "result": [:]]
+            case "account/read": return ["id": id, "result": ["account": ["type": "chatgpt", "planType": "free"]]]
+            case "account/rateLimits/read": return ["id": id, "error": ["code": -32000, "message": "Upgrade your plan to use Codex"]]
+            default: return ["id": id, "result": [:]]
+            }
+        }
+        let restrictedClient = RPCClient { restrictedPipe }
+        do {
+            _ = try await restrictedClient.readCodexUsage()
+            Issue.record("Expected plan restriction error")
+        } catch let error as ProviderError {
+            #expect(error.message.contains("current ChatGPT plan"))
+        }
+        restrictedClient.shutdown()
     }
 
     @Test @MainActor func testExitRecovery() async throws {
