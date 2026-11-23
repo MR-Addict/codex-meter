@@ -2,61 +2,85 @@ import Testing
 import Foundation
 @testable import MeterCore
 
-final class UsageTests {
-    func parse(_ json: String) throws -> Usage { try Usage.decode(Data(json.utf8)) }
-    @Test func testCoreSelectionAndAdditionalBuckets() throws {
-        let value = try parse(#"{"rateLimits":{"primary":{"usedPercent":5}},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":22.1,"windowDurationMins":300},"secondary":{"usedPercent":61,"windowDurationMins":10080}},"other":{"primary":{"usedPercent":99}}},"unknown":"ignored"}"#)
-        expectEqual(value.remaining, 39)
-        expectEqual(value.core?.primary?.label, "5-hour")
-        expectEqual(value.core?.secondary?.label, "Weekly")
-        expectEqual(value.additionalBuckets.map(\.0), ["other"])
+final class CodexUsageTests {
+    func parse(_ json: String) throws -> CodexUsage { try CodexUsage.decode(Data(json.utf8)) }
+
+    @Test func testCoreSelectionAdditionalBucketsAndSnapshotMapping() throws {
+        let value = try parse(#"{"rateLimits":{"primary":{"usedPercent":5}},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":22.1,"windowDurationMins":300,"resetsAt":5000},"secondary":{"usedPercent":61,"windowDurationMins":10080,"resetsAt":9000},"credits":{"balance":"12"}},"other":{"limitName":"Code Review","primary":{"usedPercent":99}}},"rateLimitResetCredits":{"availableCount":2},"unknown":"ignored"}"#)
+        #expect(value.remaining == 39)
+        #expect(value.core?.primary?.label == "5-hour")
+        #expect(value.core?.secondary?.label == "Weekly")
+        #expect(value.additionalBuckets.map(\.0) == ["other"])
+
+        let snapshot = value.toSnapshot(fetchedAt: Date(timeIntervalSince1970: 0))
+        #expect(snapshot.serviceID == .codex)
+        #expect(snapshot.headline?.remainingPercent == 39)
+        #expect(snapshot.headline?.nearestResetAt == Date(timeIntervalSince1970: 5000))
+        #expect(snapshot.sections.count == 2)
+        #expect(snapshot.sections[0].items.map(\.title) == ["5-hour", "Weekly"])
+        #expect(!snapshot.sections[0].isCollapsible)
+        #expect(snapshot.sections[1].title == "Code Review")
+        #expect(snapshot.sections[1].isCollapsible)
+        #expect(!snapshot.sections[1].isExpandedByDefault)
+        #expect(snapshot.sections[1].summaryPercent == 1)
+        #expect(snapshot.badges.map(\.text) == ["Credits 12", "2 resets"])
     }
+
     @Test func testLegacyOptionalAndClamp() throws {
-        expectEqual(try parse(#"{"rateLimits":{"primary":{"usedPercent":-10}}}"#).remaining, 100)
-        expectEqual(try parse(#"{"rateLimits":{"secondary":{"usedPercent":150}}}"#).remaining, 0)
+        #expect(try parse(#"{"rateLimits":{"primary":{"usedPercent":-10}}}"#).remaining == 100)
+        #expect(try parse(#"{"rateLimits":{"secondary":{"usedPercent":150}}}"#).remaining == 0)
         let empty = try parse(#"{"rateLimits":{}}"#)
-        expectNil(empty.remaining)
-        expectNil(empty.core?.credits)
-        expectNil(empty.rateLimitResetCredits)
+        #expect(empty.remaining == nil)
+        #expect(empty.core?.credits == nil)
+        #expect(empty.rateLimitResetCredits == nil)
     }
+
     @Test func testCreditsDoNotInferZero() throws {
         let value = try parse(#"{"rateLimits":{"credits":{"hasCredits":false,"unlimited":false,"balance":null}},"rateLimitResetCredits":{"availableCount":0}}"#)
-        expectEqual(value.core?.credits?.display, "Unavailable")
-        expectEqual(value.rateLimitResetCredits?.availableCount, 0)
-        expectEqual(try parse(#"{"rateLimits":{"credits":{"unlimited":true}}}"#).core?.credits?.display, "Unlimited")
+        #expect(value.core?.credits?.display == "Unavailable")
+        #expect(value.rateLimitResetCredits?.availableCount == 0)
+        #expect(try parse(#"{"rateLimits":{"credits":{"unlimited":true}}}"#).core?.credits?.display == "Unlimited")
     }
+
     @Test func testResetFormatting() throws {
         let window = try #require(parse(#"{"rateLimits":{"primary":{"usedPercent":20,"windowDurationMins":90,"resetsAt":5000}}}"#).core?.primary)
-        expectEqual(window.label, "90-minute")
-        expectEqual(window.resetText(now: Date(timeIntervalSince1970: 0)), "Resets in 1h 24m")
-        expectEqual(window.resetText(now: Date(timeIntervalSince1970: 6000)), "Reset due · refresh to check")
-        expectEqual(try parse(#"{"rateLimits":{"primary":{"usedPercent":0}}}"#).core?.primary?.resetText(), "Reset time unavailable")
+        #expect(window.label == "90-minute")
+        #expect(window.resetText(now: Date(timeIntervalSince1970: 0)) == "Resets in 1h 24m")
+        #expect(window.resetText(now: Date(timeIntervalSince1970: 6000)) == "Reset due · refresh to check")
+        #expect(ResetFormatter.compactFormat(resetsAt: Date(timeIntervalSince1970: 5000), now: Date(timeIntervalSince1970: 0)) == "1h 24m")
+        #expect(ResetFormatter.compactFormat(resetsAt: Date(timeIntervalSince1970: 5000), now: Date(timeIntervalSince1970: 6000)) == "Due")
+        #expect(try parse(#"{"rateLimits":{"primary":{"usedPercent":0}}}"#).core?.primary?.resetText() == "Reset time unavailable")
     }
+
     @Test func testNearestResetAcrossWindows() throws {
         let value = try parse(#"{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300,"resetsAt":5000},"secondary":{"usedPercent":20,"windowDurationMins":10080,"resetsAt":3000}},"rateLimitsByLimitId":{"other":{"primary":{"usedPercent":50,"resetsAt":900}}}}"#)
-        expectEqual(value.nearestReset?.resetsAt, 900)
-        expectEqual(value.resetSummary(now: Date(timeIntervalSince1970: 0)), "Resets in 15m")
-        expectNil(try parse(#"{"rateLimits":{"primary":{"usedPercent":10}}}"#).nearestReset)
+        #expect(value.nearestReset?.resetsAt == 900)
+        #expect(value.resetSummary(now: Date(timeIntervalSince1970: 0)) == "Resets in 15m")
+        #expect(try parse(#"{"rateLimits":{"primary":{"usedPercent":10}}}"#).nearestReset == nil)
     }
+
     @Test func testMalformed() {
         for json in ["oops", "{}", #"{"rateLimits":{"primary":{"usedPercent":"bad"}}}"#] {
             do { _ = try parse(json); Issue.record("Expected malformed response error") } catch {}
         }
     }
+
     @Test @MainActor func testStateRetainsLastSnapshotAndBlocksOverlap() throws {
-        let state = UsageState()
-        expectEqual(state.title, "Codex —")
-        expectTrue(state.begin()); expectFalse(state.begin())
+        let state = ServiceState(descriptor: .codex)
+        #expect(state.title == "Codex —")
+        #expect(state.begin())
+        #expect(!state.begin())
         let date = Date(timeIntervalSince1970: 100)
-        state.succeed(try parse(#"{"rateLimits":{"primary":{"usedPercent":58}}}"#), now: date)
-        expectEqual(state.title, "Codex 42%")
-        expectTrue(state.begin())
-        state.fail(MeterError.service)
-        expectEqual(state.title, "Codex 42% ⚠︎")
-        expectEqual(state.lastSuccess, date)
-        expectNotNil(state.usage)
-        state.succeed(try parse(#"{"rateLimits":{}}"#))
-        expectNil(state.error)
+        let snapshot = try parse(#"{"rateLimits":{"primary":{"usedPercent":58}}}"#).toSnapshot(fetchedAt: date)
+        state.succeed(snapshot, now: date)
+        #expect(state.title == "Codex 42%")
+        #expect(state.begin())
+        state.fail(ProviderError.serviceUnavailable(serviceName: "Codex"))
+        #expect(state.title == "Codex 42% ⚠︎")
+        #expect(state.lastSuccess == date)
+        #expect(state.snapshot != nil)
+        state.succeed(try parse(#"{"rateLimits":{}}"#).toSnapshot())
+        #expect(state.error == nil)
     }
 }
 
@@ -74,8 +98,9 @@ final class UsageTests {
         methods.append(method)
         guard let id = message["id"] as? Int else { return }
         let reply: [String: Any]?
-        if let response { reply = response(method, id) }
-        else {
+        if let response {
+            reply = response(method, id)
+        } else {
             let result: [String: Any]
             switch method {
             case "account/read": result = ["account": ["type": "chatgpt"]]
@@ -99,13 +124,14 @@ final class RPCTests {
     @Test @MainActor func testHandshakeMatchingFragmentationAndReuse() async throws {
         let pipe = FakeTransport()
         let client = RPCClient { pipe }
-        let first = try await client.readUsage()
-        expectEqual(first.remaining, 75)
-        _ = try await client.readUsage()
-        expectEqual(pipe.methods, ["initialize", "initialized", "account/read", "account/rateLimits/read", "account/read", "account/rateLimits/read"])
+        let first = try await client.readCodexUsage()
+        #expect(first.remaining == 75)
+        _ = try await client.readCodexUsage()
+        #expect(pipe.methods == ["initialize", "initialized", "account/read", "account/rateLimits/read", "account/read", "account/rateLimits/read"])
         client.shutdown()
-        expectTrue(pipe.stopped)
+        #expect(pipe.stopped)
     }
+
     @Test @MainActor func testExitRecovery() async throws {
         var pipes: [FakeTransport] = []
         let client = RPCClient {
@@ -116,47 +142,63 @@ final class RPCTests {
             pipes.append(pipe)
             return pipe
         }
-        let value = try await client.readUsage()
-        expectEqual(value.remaining, 75)
-        expectEqual(pipes.count, 2)
-        expectTrue(pipes[0].stopped)
+        let value = try await client.readCodexUsage()
+        #expect(value.remaining == 75)
+        #expect(pipes.count == 2)
+        #expect(pipes[0].stopped)
         client.shutdown()
     }
+
     @Test @MainActor func testTimeoutRetriesAreBounded() async {
         var pipes: [FakeTransport] = []
         let client = RPCClient(timeout: 0.01) {
-            let pipe = FakeTransport(); pipe.response = { _, _ in nil }; pipes.append(pipe); return pipe
+            let pipe = FakeTransport()
+            pipe.response = { _, _ in nil }
+            pipes.append(pipe)
+            return pipe
         }
-        do { _ = try await client.readUsage(); Issue.record("Expected timeout") }
-        catch { expectEqual(error as? MeterError, .timeout) }
-        expectEqual(pipes.count, 3)
-        expectTrue(pipes.allSatisfy(\.stopped))
+        do {
+            _ = try await client.readCodexUsage()
+            Issue.record("Expected timeout")
+        } catch {
+            #expect((error as? ProviderError)?.category == .connection)
+        }
+        #expect(pipes.count == 3)
+        let allStopped = pipes.allSatisfy(\.stopped)
+        #expect(allStopped)
     }
+
     @Test @MainActor func testMissingLoginAndUnsupportedMethod() async {
-        for expected in [MeterError.login, .unsupported] {
+        for expected in [ErrorCategory.auth, .update] {
             let pipe = FakeTransport()
             pipe.response = { method, id in
                 if method == "initialize" { return ["id": id, "result": [:]] }
-                if expected == .unsupported { return ["id": id, "error": ["code": -32601]] }
+                if expected == .update { return ["id": id, "error": ["code": -32601]] }
                 return ["id": id, "result": ["account": NSNull()]]
             }
             let client = RPCClient { pipe }
-            do { _ = try await client.readUsage(); Issue.record("Expected failure") }
-            catch { expectEqual(error as? MeterError, expected) }
+            do {
+                _ = try await client.readCodexUsage()
+                Issue.record("Expected failure")
+            } catch {
+                #expect((error as? ProviderError)?.category == expected)
+            }
             client.shutdown()
         }
     }
+
     @Test @MainActor func testShutdownReleasesPendingRequest() async {
         let pipe = FakeTransport()
         pipe.response = { _, _ in nil }
         let client = RPCClient(timeout: 1) { pipe }
-        let task = Task { try await client.readUsage() }
+        let task = Task { try await client.readCodexUsage() }
         await Task.yield()
         task.cancel()
         client.shutdown()
         do { _ = try await task.value; Issue.record("Expected cancellation") } catch {}
-        expectTrue(pipe.stopped)
+        #expect(pipe.stopped)
     }
+
     @Test @MainActor func testMalformedWireResponse() async {
         let pipe = FakeTransport()
         pipe.response = { [weak pipe] _, _ in
@@ -164,42 +206,36 @@ final class RPCTests {
             return nil
         }
         let client = RPCClient { pipe }
-        do { _ = try await client.readUsage(); Issue.record("Expected malformed response") }
-        catch { expectEqual(error as? MeterError, .malformed) }
-        expectTrue(pipe.stopped)
+        do {
+            _ = try await client.readCodexUsage()
+            Issue.record("Expected malformed response")
+        } catch {
+            #expect((error as? ProviderError)?.category == .parse)
+        }
+        #expect(pipe.stopped)
     }
+
     @Test @MainActor func testMissingExecutable() async {
-        let client = RPCClient { throw MeterError.missingCLI }
-        do { _ = try await client.readUsage(); Issue.record("Expected missing CLI") }
-        catch { expectEqual(error as? MeterError, .missingCLI) }
-        expectNil(CLILocator.locate(custom: "/nonexistent/codex-meter-test"))
+        let client = RPCClient {
+            throw ProviderError.missingExecutable(serviceName: "Codex", executableName: "codex")
+        }
+        do {
+            _ = try await client.readCodexUsage()
+            Issue.record("Expected missing executable")
+        } catch {
+            #expect((error as? ProviderError)?.category == .setup)
+        }
+        #expect(ExecutableLocator.locate(name: "codex", custom: "/nonexistent/ai-meter-test") == nil)
     }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["CODEX_METER_LIVE_TEST"] == "1"))
     @MainActor func testLiveUsageWhenExplicitlyEnabled() async throws {
-        guard ProcessInfo.processInfo.environment["CODEX_METER_LIVE_TEST"] == "1" else {
-            return
-        }
-        let executable = try #require(CLILocator.locate())
+        guard ProcessInfo.processInfo.environment["CODEX_METER_LIVE_TEST"] == "1" else { return }
+        let executable = try #require(ExecutableLocator.locate(name: "codex"))
         let client = RPCClient { ProcessTransport(executable: executable) }
         defer { client.shutdown() }
-        let usage = try await client.readUsage()
-        expectNotNil(usage.core)
+        let usage = try await client.readCodexUsage()
+        #expect(usage.core != nil)
         // Deliberately do not print account data or balances.
     }
-}
-
-private func expectEqual<T: Equatable>(_ actual: T, _ expected: T, sourceLocation: SourceLocation = #_sourceLocation) {
-    #expect(actual == expected, sourceLocation: sourceLocation)
-}
-private func expectTrue(_ value: Bool, sourceLocation: SourceLocation = #_sourceLocation) {
-    #expect(value, sourceLocation: sourceLocation)
-}
-private func expectFalse(_ value: Bool, sourceLocation: SourceLocation = #_sourceLocation) {
-    #expect(!value, sourceLocation: sourceLocation)
-}
-private func expectNil<T>(_ value: T?, sourceLocation: SourceLocation = #_sourceLocation) {
-    #expect(value == nil, sourceLocation: sourceLocation)
-}
-private func expectNotNil<T>(_ value: T?, sourceLocation: SourceLocation = #_sourceLocation) {
-    #expect(value != nil, sourceLocation: sourceLocation)
 }

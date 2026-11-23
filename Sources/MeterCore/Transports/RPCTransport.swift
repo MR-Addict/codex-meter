@@ -13,13 +13,19 @@ import Darwin
     public var onData: ((Data) -> Void)?
     public var onExit: (() -> Void)?
     private let executable: String
+    private let arguments: [String]
     private let process = Process()
     private let input = Pipe()
     private let output = Pipe()
-    public init(executable: String) { self.executable = executable }
+
+    public init(executable: String, arguments: [String] = ["app-server"]) {
+        self.executable = executable
+        self.arguments = arguments
+    }
+
     public func start() throws {
         process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["app-server"]
+        process.arguments = arguments
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         process.standardInput = input
         process.standardOutput = output
@@ -34,10 +40,16 @@ import Darwin
                 if data.isEmpty { self?.onExit?() } else { self?.onData?(data) }
             }
         }
-        process.terminationHandler = { [weak self] _ in Task { @MainActor in self?.onExit?() } }
+        process.terminationHandler = { [weak self] _ in
+            Task { @MainActor in self?.onExit?() }
+        }
         try process.run()
     }
-    public func write(_ data: Data) throws { try input.fileHandleForWriting.write(contentsOf: data) }
+
+    public func write(_ data: Data) throws {
+        try input.fileHandleForWriting.write(contentsOf: data)
+    }
+
     public func stop() {
         output.fileHandleForReading.readabilityHandler = nil
         process.terminationHandler = nil
@@ -53,6 +65,8 @@ import Darwin
 }
 
 @MainActor public final class RPCClient {
+    private let serviceName: String
+    private let loginCommand: String?
     private let factory: () throws -> RPCTransport
     private let timeout: TimeInterval
     private var transport: RPCTransport?
@@ -63,19 +77,40 @@ import Darwin
     private var generation = UUID()
     private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
     private var deadlines: [Int: Task<Void, Never>] = [:]
-    public init(timeout: TimeInterval = 20, factory: @escaping () throws -> RPCTransport) {
-        self.timeout = timeout; self.factory = factory
+
+    public init(
+        serviceName: String = "Codex",
+        loginCommand: String? = "codex login",
+        timeout: TimeInterval = 20,
+        factory: @escaping () throws -> RPCTransport
+    ) {
+        self.serviceName = serviceName
+        self.loginCommand = loginCommand
+        self.timeout = timeout
+        self.factory = factory
     }
-    public func shutdown() { stopped = true; disconnect(CancellationError()) }
+
+    public func shutdown() {
+        stopped = true
+        disconnect(CancellationError())
+    }
+
     private func disconnect(_ error: Error) {
-        generation = UUID(); ready = false
-        let old = transport; transport = nil
-        old?.onData = nil; old?.onExit = nil; old?.stop()
+        generation = UUID()
+        ready = false
+        let old = transport
+        transport = nil
+        old?.onData = nil
+        old?.onExit = nil
+        old?.stop()
         buffer.removeAll()
-        let requests = pending; pending.removeAll()
-        deadlines.values.forEach { $0.cancel() }; deadlines.removeAll()
+        let requests = pending
+        pending.removeAll()
+        deadlines.values.forEach { $0.cancel() }
+        deadlines.removeAll()
         requests.values.forEach { $0.resume(throwing: error) }
     }
+
     private func connect() async throws {
         try checkActive()
         guard !ready else { return }
@@ -88,24 +123,32 @@ import Darwin
         }
         pipe.onExit = { [weak self] in
             guard let self, self.generation == token else { return }
-            self.disconnect(MeterError.disconnected)
+            self.disconnect(ProviderError.disconnected(serviceName: self.serviceName))
         }
         do {
             try pipe.start()
-            _ = try await request("initialize", params: ["clientInfo": ["name": "codex_meter", "title": "Codex Meter", "version": "0.2.0"]])
+            _ = try await request(
+                "initialize",
+                params: ["clientInfo": ["name": "ai_meter", "title": "AI Meter", "version": "0.3.0"]]
+            )
             try send(["method": "initialized", "params": [:]])
             ready = true
         } catch is CancellationError {
-            disconnect(CancellationError()); throw CancellationError()
-        } catch let error as MeterError {
-            disconnect(error); throw error
+            disconnect(CancellationError())
+            throw CancellationError()
+        } catch let error as ProviderError {
+            disconnect(error)
+            throw error
         } catch {
             // The executable exists but could not be launched (arch, quarantine,
             // permissions, or a just-removed install).
-            disconnect(MeterError.launch); throw MeterError.launch
+            let failure = ProviderError.launchFailed(serviceName: serviceName)
+            disconnect(failure)
+            throw failure
         }
     }
-    public func readUsage() async throws -> Usage {
+
+    public func readCodexUsage() async throws -> CodexUsage {
         for attempt in 0..<3 {
             try checkActive()
             do {
@@ -114,35 +157,49 @@ import Darwin
                 let accountData = try await request("account/read", params: ["refreshToken": false])
                 let account = try JSONSerialization.jsonObject(with: accountData) as? [String: Any]
                 guard let details = account?["account"] as? [String: Any], details["type"] as? String == "chatgpt" else {
-                    throw MeterError.login
+                    throw ProviderError.authRequired(
+                        serviceName: serviceName,
+                        command: loginCommand,
+                        detail: "Sign in using ‘codex login’ in Terminal, then refresh. A ChatGPT login is required."
+                    )
                 }
-                return try Usage.decode(await request("account/rateLimits/read", params: [:]))
-            } catch let error as MeterError {
-                switch error {
-                case .disconnected, .timeout:
+                return try CodexUsage.decode(await request("account/rateLimits/read", params: [:]))
+            } catch let error as ProviderError {
+                let shouldRetry = error == .disconnected(serviceName: serviceName)
+                    || error == .timeout(serviceName: serviceName)
+                if shouldRetry {
                     disconnect(error)
                     if attempt < 2 {
                         try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
                         continue
                     }
-                default: break
                 }
                 throw error
-            } catch is CancellationError { throw CancellationError() }
-            catch { throw MeterError.malformed }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw ProviderError.malformed(serviceName: serviceName)
+            }
         }
-        throw MeterError.disconnected
+        throw ProviderError.disconnected(serviceName: serviceName)
     }
+
     private func checkActive() throws {
         try Task.checkCancellation()
         if stopped { throw CancellationError() }
     }
+
     private func send(_ message: [String: Any]) throws {
-        guard let transport else { throw MeterError.disconnected }
+        guard let transport else { throw ProviderError.disconnected(serviceName: serviceName) }
         var data = try JSONSerialization.data(withJSONObject: message)
         data.append(10)
-        do { try transport.write(data) } catch { throw MeterError.disconnected }
+        do {
+            try transport.write(data)
+        } catch {
+            throw ProviderError.disconnected(serviceName: serviceName)
+        }
     }
+
     private func request(_ method: String, params: [String: Any]) async throws -> Data {
         try checkActive()
         nextID += 1
@@ -151,33 +208,58 @@ import Darwin
             pending[id] = continuation
             deadlines[id] = Task { [weak self, timeout] in
                 do { try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000)) } catch { return }
-                self?.disconnect(MeterError.timeout)
+                guard let self else { return }
+                self.disconnect(ProviderError.timeout(serviceName: self.serviceName))
             }
-            do { try send(["id": id, "method": method, "params": params]) }
-            catch { disconnect(error) }
+            do {
+                try send(["id": id, "method": method, "params": params])
+            } catch {
+                disconnect(error)
+            }
         }
     }
+
     private func receive(_ data: Data) {
         buffer.append(data)
-        guard buffer.count <= 4 * 1024 * 1024 else { disconnect(MeterError.malformed); return }
+        guard buffer.count <= 4 * 1024 * 1024 else {
+            disconnect(ProviderError.malformed(serviceName: serviceName))
+            return
+        }
         while let newline = buffer.firstIndex(of: 10) {
-            let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
+            let line = Data(buffer[..<newline])
+            buffer.removeSubrange(...newline)
             if line.isEmpty { continue }
             guard let message = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else {
-                disconnect(MeterError.malformed); return
+                disconnect(ProviderError.malformed(serviceName: serviceName))
+                return
             }
             guard let id = message["id"] as? Int, let continuation = pending.removeValue(forKey: id) else { continue }
             deadlines.removeValue(forKey: id)?.cancel()
             if let error = message["error"] as? [String: Any] {
                 let code = error["code"] as? Int
                 let text = (error["message"] as? String ?? "").lowercased()
-                let failure: MeterError = code == -32601 ? .unsupported :
-                    (text.contains("auth") || text.contains("login") || text.contains("sign in") ? .login : .service)
+                let failure: ProviderError
+                if code == -32601 {
+                    failure = ProviderError.unsupported(
+                        serviceName: serviceName,
+                        detail: "Update \(serviceName) CLI: this version does not support the required account interface."
+                    )
+                } else if text.contains("auth") || text.contains("login") || text.contains("sign in") {
+                    failure = ProviderError.authRequired(
+                        serviceName: serviceName,
+                        command: loginCommand,
+                        detail: "Sign in using ‘codex login’ in Terminal, then refresh. A ChatGPT login is required."
+                    )
+                } else {
+                    failure = ProviderError.serviceUnavailable(serviceName: serviceName)
+                }
                 continuation.resume(throwing: failure)
             } else if let result = message["result"], JSONSerialization.isValidJSONObject(result),
                       let encoded = try? JSONSerialization.data(withJSONObject: result) {
                 continuation.resume(returning: encoded)
-            } else { continuation.resume(throwing: MeterError.malformed) }
+            } else {
+                continuation.resume(throwing: ProviderError.malformed(serviceName: serviceName))
+            }
         }
     }
 }
