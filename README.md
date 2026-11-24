@@ -10,6 +10,12 @@ A lightweight macOS menu bar app for monitoring AI coding tool usage limits and 
 
 Automatically detects installed CLIs, shows one active readout in the menu bar, and lets you switch services from the popover (`⌘1`, `⌘2`, …).
 
+## Screenshots
+
+| Codex | Antigravity | Copilot |
+| --- | --- | --- |
+| ![AI Meter showing Codex quota](assets/codex.png) | ![AI Meter showing Antigravity quota](assets/antigravity.png) | ![AI Meter showing Copilot quota](assets/copilot.png) |
+
 ## Requirements
 
 - macOS 13+
