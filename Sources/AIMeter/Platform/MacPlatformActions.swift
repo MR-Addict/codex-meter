@@ -1,5 +1,4 @@
 import AppKit
-import ServiceManagement
 
 /// macOS platform side-effect boundary injected into `MeterModel` for clean separation & testability.
 @MainActor protocol PlatformActions: AnyObject {
@@ -7,8 +6,8 @@ import ServiceManagement
     func isExecutableFile(atPath path: String) -> Bool
     func isReadableFile(atPath path: String) -> Bool
     func copyToClipboard(_ text: String)
-    func loginItemStatus() -> SMAppService.Status
-    func setLoginItemEnabled(_ enabled: Bool) throws -> SMAppService.Status
+    func loginItemStatus() -> LoginItemStatus
+    func setLoginItemEnabled(_ enabled: Bool) throws -> LoginItemStatus
     func observeSystemEvents(
         onWake: @escaping @MainActor () -> Void,
         onAppActive: @escaping @MainActor () -> Void,
@@ -19,6 +18,8 @@ import ServiceManagement
 }
 
 @MainActor final class MacPlatformActions: PlatformActions {
+    private let launchAgent = LaunchAtLoginAgent()
+
     func chooseFile(title: String, initialDirectory: URL?) -> URL? {
         let panel = NSOpenPanel()
         panel.title = title
@@ -44,17 +45,12 @@ import ServiceManagement
         pasteboard.setString(text, forType: .string)
     }
 
-    func loginItemStatus() -> SMAppService.Status {
-        SMAppService.mainApp.status
+    func loginItemStatus() -> LoginItemStatus {
+        launchAgent.status()
     }
 
-    func setLoginItemEnabled(_ enabled: Bool) throws -> SMAppService.Status {
-        if enabled {
-            try SMAppService.mainApp.register()
-        } else {
-            try SMAppService.mainApp.unregister()
-        }
-        return SMAppService.mainApp.status
+    func setLoginItemEnabled(_ enabled: Bool) throws -> LoginItemStatus {
+        try launchAgent.setEnabled(enabled)
     }
 
     func observeSystemEvents(

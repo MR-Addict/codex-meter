@@ -1,5 +1,4 @@
 import Foundation
-import ServiceManagement
 import Testing
 import MeterCore
 @testable import AIMeter
@@ -100,7 +99,7 @@ import MeterCore
     var executablePaths: Set<String> = []
     var readablePaths: Set<String> = []
     var copiedTexts: [String] = []
-    var loginStatus: SMAppService.Status = .notRegistered
+    var loginStatus: LoginItemStatus = .disabled
     var lastFilePanelTitle: String?
     var terminated = false
 
@@ -121,12 +120,12 @@ import MeterCore
         copiedTexts.append(text)
     }
 
-    func loginItemStatus() -> SMAppService.Status {
+    func loginItemStatus() -> LoginItemStatus {
         loginStatus
     }
 
-    func setLoginItemEnabled(_ enabled: Bool) throws -> SMAppService.Status {
-        loginStatus = enabled ? .enabled : .notRegistered
+    func setLoginItemEnabled(_ enabled: Bool) throws -> LoginItemStatus {
+        loginStatus = enabled ? .enabled : .disabled
         return loginStatus
     }
 
@@ -328,6 +327,39 @@ struct MeterModelTests {
         #expect(model.loginEnabled)
         model.quit()
         #expect(platform.terminated)
+    }
+
+    @Test func launchAtLoginAgentWritesAndRemovesPlist() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ai-meter-launch-agent-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        var cleanupCalls = 0
+        let agent = LaunchAtLoginAgent(
+            label: "local.ai-meter.test",
+            launchAgentsDirectory: tempDir,
+            appBundlePath: { "/Users/test/Applications/AI Meter.app" },
+            legacyCleanup: { cleanupCalls += 1 }
+        )
+
+        #expect(agent.status() == .disabled)
+        let enabledStatus = try agent.setEnabled(true)
+        #expect(enabledStatus == .enabled)
+        #expect(agent.status() == .enabled)
+        #expect(cleanupCalls == 1)
+
+        let data = try Data(contentsOf: agent.plistURL)
+        let plist = try #require(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        #expect(plist["Label"] as? String == "local.ai-meter.test")
+        #expect(plist["RunAtLoad"] as? Bool == true)
+        #expect(plist["LimitLoadToSessionType"] as? String == "Aqua")
+        #expect(plist["ProgramArguments"] as? [String] == ["/usr/bin/open", "-a", "/Users/test/Applications/AI Meter.app"])
+
+        let disabledStatus = try agent.setEnabled(false)
+        #expect(disabledStatus == .disabled)
+        #expect(agent.status() == .disabled)
+        #expect(!FileManager.default.fileExists(atPath: agent.plistURL.path))
+        #expect(cleanupCalls == 2)
     }
 }
 

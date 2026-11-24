@@ -1,5 +1,4 @@
 import SwiftUI
-import ServiceManagement
 import MeterCore
 import Combine
 
@@ -194,7 +193,7 @@ import Combine
                 : nil
         } catch {
             loginEnabled = platform.loginItemStatus() == .enabled
-            preferenceError = "Could not change Launch at Login. Move the app to Applications and try again."
+            preferenceError = "Could not update Launch at Login. Check permissions for ~/Library/LaunchAgents."
         }
     }
 
