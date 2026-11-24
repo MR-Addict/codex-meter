@@ -58,21 +58,20 @@ import Combine
             return
         }
 
-        let percentage = state.menuBarValue
         button.image = icon(for: descriptor.id)
-        button.title = " " + percentage + (state.isStale ? " ·" : "")
-        button.setAccessibilityLabel("\(descriptor.name) usage: \(percentage)")
+        button.title = " " + state.menuBarValue + (state.isStale ? " ·" : "")
+        button.setAccessibilityLabel("\(descriptor.name) usage: \(state.quotaDescription)")
 
         let switchHint = model.enabledServices.count > 1 ? "\nClick to view details or switch services." : ""
         let planSuffix = state.snapshot?.planName.map { " (\($0))" } ?? ""
         if let error = state.error, state.snapshot != nil {
-            button.toolTip = "\(descriptor.name)\(planSuffix): \(percentage) remaining, showing last known usage.\n\(error)"
+            button.toolTip = "\(descriptor.name)\(planSuffix): \(state.quotaDescription), showing last known usage.\n\(error)"
         } else if let reset = state.snapshot?.resetSummary() {
-            button.toolTip = "\(descriptor.name)\(planSuffix): \(percentage) remaining\n\(reset)\(switchHint)"
+            button.toolTip = "\(descriptor.name)\(planSuffix): \(state.quotaDescription)\n\(reset)\(switchHint)"
         } else if let error = state.error {
             button.toolTip = "\(descriptor.name) usage unavailable.\n\(error)"
         } else if state.snapshot != nil {
-            button.toolTip = "\(descriptor.name)\(planSuffix): \(percentage) remaining\(switchHint)"
+            button.toolTip = "\(descriptor.name)\(planSuffix): \(state.quotaDescription)\(switchHint)"
         } else {
             button.toolTip = state.refreshing ? "\(descriptor.name): connecting…" : "\(descriptor.name) usage"
         }

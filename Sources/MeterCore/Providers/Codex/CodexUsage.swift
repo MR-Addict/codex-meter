@@ -65,7 +65,7 @@ public struct CodexUsage: Decodable, Sendable {
     }
 
     public var core: CodexBucket? { coreEntry?.bucket }
-    public var remaining: Int? { core?.windows.map(\.remaining).min() }
+    public var remaining: Int? { selectedHeadline?.item.remainingPercent }
 
     public var rawPlanType: String? {
         core?.planType
@@ -95,7 +95,7 @@ public struct CodexUsage: Decodable, Sendable {
     }
 
     public func resetSummary(now: Date = Date()) -> String? {
-        nearestReset?.resetText(now: now)
+        selectedHeadline?.metric.detailText(now: now)
     }
 
     public static func decode(_ data: Data, fallbackPlanType: String? = nil) throws -> CodexUsage {
@@ -149,25 +149,35 @@ public struct CodexUsage: Decodable, Sendable {
         }
     }
 
-    /// Converts Codex's wire format into the generic `UsageSnapshot`.
-    public func toSnapshot(fetchedAt: Date = Date()) -> UsageSnapshot {
-        let nearestDate = nearestReset?.resetsAt.map { Date(timeIntervalSince1970: $0) }
-        let headline = HeadlineMetric(
-            title: "Overall remaining",
-            remainingPercent: remaining,
-            nearestResetAt: nearestDate
-        )
-
-        var sections: [QuotaSection] = []
-        if let core {
-            let items = core.windows.enumerated().map { index, window in
-                QuotaItem(
-                    id: "codex-core-\(index)-\(window.label)",
-                    title: window.label,
-                    remainingPercent: window.remaining,
-                    resetPolicy: window.resetsAt.map { .at(Date(timeIntervalSince1970: $0)) } ?? .unavailable
-                )
+    private var coreCandidates: [HeadlineCandidate] {
+        [("primary", core?.primary), ("secondary", core?.secondary)].compactMap { slot, value in
+            guard let window = value else { return nil }
+            let kind: QuotaWindow = switch window.windowDurationMins {
+            case 300: .fiveHour
+            case 10080: .weekly
+            default: .other
             }
+            let item = QuotaItem(
+                id: "codex-core-\(slot)",
+                title: window.label,
+                remainingPercent: window.remaining,
+                resetPolicy: window.resetsAt.map { .at(Date(timeIntervalSince1970: $0)) } ?? .unavailable
+            )
+            return HeadlineCandidate(item: item, sectionID: "codex-core", groupKey: "codex-core",
+                                     window: kind, exhausted: window.usedPercent.map { $0 >= 100 } ?? false)
+        }
+    }
+
+    private var selectedHeadline: HeadlineCandidate? {
+        ServiceDescriptor.codex.headlinePolicy.select(coreCandidates)
+    }
+
+    public func toSnapshot(fetchedAt: Date = Date()) -> UsageSnapshot {
+        let candidates = coreCandidates
+        let headline = ServiceDescriptor.codex.headlinePolicy.select(candidates)?.metric ?? .unavailable
+        var sections: [QuotaSection] = []
+        if core != nil {
+            let items = candidates.map(\.item)
             let emptyText: String? = items.isEmpty
                 ? (ordinaryUsageAllowed == false ? "Codex not included in current plan" : "Allowance unavailable")
                 : nil
@@ -255,11 +265,11 @@ public struct CodexBucket: Decodable, Sendable {
 }
 
 public struct CodexWindow: Decodable, Sendable {
-    public let usedPercent: Double
+    public let usedPercent: Double?
     public let windowDurationMins: Int?
     public let resetsAt: Double?
 
-    public var remaining: Int { JSONParsing.clampedPercent(100 - usedPercent) }
+    public var remaining: Int? { usedPercent.map { JSONParsing.clampedPercent(100 - $0) } }
 
     public var label: String {
         guard let minutes = windowDurationMins, minutes > 0 else { return "Allowance" }

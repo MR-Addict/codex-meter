@@ -30,6 +30,7 @@ public struct ServiceDescriptor: Identifiable, Equatable, Hashable, Sendable {
     public let docsURL: URL
     public let loginCommand: String?
     public let executableName: String
+    public let headlinePolicy: HeadlinePolicy
     public let requirementLabel: String
 
     public init(
@@ -40,8 +41,10 @@ public struct ServiceDescriptor: Identifiable, Equatable, Hashable, Sendable {
         docsURL: URL,
         loginCommand: String?,
         executableName: String,
+        headlinePolicy: HeadlinePolicy,
         requirementLabel: String
     ) {
+        self.headlinePolicy = headlinePolicy
         self.id = id
         self.name = name
         self.shortName = shortName

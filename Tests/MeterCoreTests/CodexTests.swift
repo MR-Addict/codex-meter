@@ -7,7 +7,7 @@ final class CodexUsageTests {
 
     @Test func testCoreSelectionAdditionalBucketsAndSnapshotMapping() throws {
         let value = try parse(#"{"rateLimits":{"primary":{"usedPercent":5}},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":22.1,"windowDurationMins":300,"resetsAt":5000},"secondary":{"usedPercent":61,"windowDurationMins":10080,"resetsAt":9000},"credits":{"balance":"12"}},"other":{"limitName":"Code Review","primary":{"usedPercent":99}}},"rateLimitResetCredits":{"availableCount":2},"unknown":"ignored"}"#)
-        #expect(value.remaining == 39)
+        #expect(value.remaining == 77)
         #expect(value.core?.primary?.label == "5-hour")
         #expect(value.core?.secondary?.label == "Weekly")
         #expect(value.additionalBuckets.map(\.0) == ["other"])
@@ -15,7 +15,7 @@ final class CodexUsageTests {
         let snapshot = value.toSnapshot(fetchedAt: Date(timeIntervalSince1970: 0))
         #expect(snapshot.serviceID == .codex)
         #expect(snapshot.collapsibleSectionTitle == "Other allowances")
-        #expect(snapshot.headline?.remainingPercent == 39)
+        #expect(snapshot.headline?.remainingPercent == 77)
         #expect(snapshot.headline?.nearestResetAt == Date(timeIntervalSince1970: 5000))
         #expect(snapshot.sections.count == 2)
         #expect(snapshot.sections[0].items.map(\.title) == ["5-hour", "Weekly"])
@@ -56,7 +56,7 @@ final class CodexUsageTests {
     @Test func testNearestResetAcrossWindows() throws {
         let value = try parse(#"{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300,"resetsAt":5000},"secondary":{"usedPercent":20,"windowDurationMins":10080,"resetsAt":3000}},"rateLimitsByLimitId":{"other":{"primary":{"usedPercent":50,"resetsAt":900}}}}"#)
         #expect(value.nearestReset?.resetsAt == 900)
-        #expect(value.resetSummary(now: Date(timeIntervalSince1970: 0)) == "Resets in 15m")
+        #expect(value.resetSummary(now: Date(timeIntervalSince1970: 0)) == "Resets in 1h 24m")
         #expect(try parse(#"{"rateLimits":{"primary":{"usedPercent":10}}}"#).nearestReset == nil)
     }
 

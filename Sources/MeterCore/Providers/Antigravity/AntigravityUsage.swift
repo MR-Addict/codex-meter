@@ -9,6 +9,8 @@ public struct AntigravityUsage: Equatable, Sendable {
         public let tag: String?
         public let remainingPercent: Int?
         public let resetsAt: Date?
+        let window: QuotaWindow
+        let exhausted: Bool
         public let isDisabled: Bool
 
         public init(
@@ -17,8 +19,17 @@ public struct AntigravityUsage: Equatable, Sendable {
             tag: String? = nil,
             remainingPercent: Int?,
             resetsAt: Date? = nil,
-            isDisabled: Bool = false
+            isDisabled: Bool = false,
+            windowName: String? = nil,
+            exhausted: Bool? = nil
         ) {
+            let token = windowName ?? tag ?? AntigravityUsage.normalizeBucketKey(id).1 ?? title
+            switch token.lowercased() {
+            case "5h", "5-hour", "five_hour", "five hour": self.window = .fiveHour
+            case "weekly", "week", "7d": self.window = .weekly
+            default: self.window = .other
+            }
+            self.exhausted = exhausted ?? (remainingPercent == 0)
             self.id = id
             self.title = title
             self.tag = tag
@@ -55,7 +66,32 @@ public struct AntigravityUsage: Equatable, Sendable {
     public init(planLabel: String? = nil, aiCredits: String? = nil, models: [ModelQuota]) {
         self.planLabel = planLabel
         self.aiCredits = aiCredits
-        self.groups = [ModelGroup(id: "antigravity-models", name: "Model limits", buckets: models)]
+        // Flat responses encode the pool in the bucket key (e.g. gemini-weekly).
+        // Keep unwindowed legacy model lists in their original order.
+        var order: [String] = []
+        var pools: [String: [ModelQuota]] = [:]
+        for model in models {
+            let (_, suffix) = Self.normalizeBucketKey(model.id)
+            let id: String
+            if suffix != nil {
+                id = model.id.split(separator: "-").dropLast().joined(separator: "-")
+            } else if model.window != .other {
+                id = model.id
+            } else {
+                id = "antigravity-models"
+            }
+            if pools[id] == nil { order.append(id) }
+            pools[id, default: []].append(model)
+        }
+        if models.isEmpty {
+            self.groups = [ModelGroup(id: "antigravity-models", name: "Model limits", buckets: [])]
+            return
+        }
+        self.groups = order.compactMap { id in
+            guard let buckets = pools[id], let first = buckets.first else { return nil }
+            let name = id == "antigravity-models" ? "Model limits" : first.title
+            return ModelGroup(id: id, name: name, buckets: buckets)
+        }
     }
 
     public var models: [ModelQuota] {
@@ -90,14 +126,8 @@ public struct AntigravityUsage: Equatable, Sendable {
         // High-confidence Free signal: active window-based buckets exist, all are weekly-only (no 5-hour window).
         let active = activeModels
         if !active.isEmpty {
-            let hasWeekly = active.contains {
-                $0.title.caseInsensitiveCompare("Weekly") == .orderedSame
-                    || $0.tag?.caseInsensitiveCompare("Weekly") == .orderedSame
-            }
-            let hasFiveHour = active.contains {
-                $0.title.caseInsensitiveCompare("5-hour") == .orderedSame
-                    || $0.tag?.caseInsensitiveCompare("5-hour") == .orderedSame
-            }
+            let hasWeekly = active.contains { $0.window == .weekly }
+            let hasFiveHour = active.contains { $0.window == .fiveHour }
             if hasWeekly && !hasFiveHour {
                 return "Free"
             }
@@ -133,59 +163,48 @@ public struct AntigravityUsage: Equatable, Sendable {
     }
 
     public func toSnapshot(fetchedAt: Date = Date()) -> UsageSnapshot {
-        let active = activeModels
-        let lowest = lowestRemaining
-        let subtitleFallback: String? = nearestResetAt == nil && !active.isEmpty
-            ? "\(active.count) model limit\(active.count == 1 ? "" : "s") tracked"
-            : nil
-
-        let headline = HeadlineMetric(
-            title: "Lowest quota",
-            remainingPercent: lowest,
-            nearestResetAt: nearestResetAt,
-            subtitle: subtitleFallback
-        )
-
-        // Put the most-constrained (lowest remaining %) model group first as primary;
-        // tie-break by original group order so Gemini Models stays primary on ties.
-        let orderedGroups: [ModelGroup]
-        if groups.count > 1 {
-            let primaryIndex = groups.enumerated().min { lhs, rhs in
-                let leftMin = lhs.element.buckets.filter { !$0.isDisabled }.compactMap(\.remainingPercent).min() ?? Int.max
-                let rightMin = rhs.element.buckets.filter { !$0.isDisabled }.compactMap(\.remainingPercent).min() ?? Int.max
-                if leftMin != rightMin { return leftMin < rightMin }
-                return lhs.offset < rhs.offset
-            }?.offset ?? 0
-
-            var reordered = [groups[primaryIndex]]
-            for (idx, group) in groups.enumerated() where idx != primaryIndex {
-                reordered.append(group)
-            }
-            orderedGroups = reordered
-        } else {
-            orderedGroups = groups
-        }
-
-        let sections: [QuotaSection] = orderedGroups.enumerated().map { index, group in
-            let isSecondary = orderedGroups.count > 1 && index > 0
-            let items = group.buckets.map { bucket in
-                QuotaItem(
+        let grouped = groups.map { group in
+            let sectionID = "agy-group-\(group.id)"
+            let isGemini = [group.id, group.name].contains {
+                ["gemini", "gemini-models", "gemini models"].contains($0.lowercased())
+            } || group.buckets.contains { ["gemini-5h", "gemini-weekly"].contains($0.id.lowercased()) }
+            let name = isGemini ? "Gemini" : Self.displayGroupName(group.name)
+            let candidates = group.buckets.map { bucket in
+                let title: String
+                switch bucket.window {
+                case .fiveHour: title = "5-hour"
+                case .weekly: title = "Weekly"
+                case .other:
+                    title = bucket.title == group.name ? (bucket.tag ?? bucket.title) : bucket.title
+                }
+                let item = QuotaItem(
                     id: "agy-\(group.id)-\(bucket.id)",
-                    title: bucket.title,
-                    tag: bucket.tag,
+                    title: title,
+                    tag: bucket.window == .other && bucket.tag != title ? bucket.tag : nil,
                     remainingPercent: bucket.remainingPercent,
                     resetPolicy: bucket.resetsAt.map { .at($0) } ?? .none,
                     isDisabled: bucket.isDisabled
                 )
+                return HeadlineCandidate(item: item, sectionID: sectionID, groupKey: isGemini ? "gemini" : group.id,
+                                         groupTitle: name, window: bucket.window, exhausted: bucket.exhausted)
             }
-            return QuotaSection(
-                id: "agy-group-\(group.id)",
-                title: Self.displayGroupName(group.name),
-                detailText: Self.displayGroupDetail(group.description),
-                items: items,
-                emptyMessage: items.isEmpty ? "No model limits reported" : nil,
-                isCollapsible: isSecondary,
-                isExpandedByDefault: !isSecondary
+            return (group: group, id: sectionID, candidates: candidates)
+        }
+        let selected = ServiceDescriptor.antigravity.headlinePolicy.select(grouped.flatMap(\.candidates))
+        var ordered = grouped
+        if let index = ordered.firstIndex(where: { $0.id == selected?.sectionID }) {
+            let primary = ordered.remove(at: index)
+            ordered.insert(primary, at: 0)
+        }
+        let sections = ordered.enumerated().map { index, entry in
+            QuotaSection(
+                id: entry.id,
+                title: Self.displayGroupName(entry.group.name),
+                detailText: Self.displayGroupDetail(entry.group.description),
+                items: entry.candidates.map(\.item),
+                emptyMessage: entry.candidates.isEmpty ? "No model limits reported" : nil,
+                isCollapsible: index > 0,
+                isExpandedByDefault: index == 0
             )
         }
 
@@ -199,7 +218,7 @@ public struct AntigravityUsage: Equatable, Sendable {
             fetchedAt: fetchedAt,
             accountSubtitle: planLabel,
             planName: planName,
-            headline: headline,
+            headline: selected?.metric ?? HeadlineMetric.unavailable,
             sections: sections,
             collapsibleSectionTitle: "Other models",
             badges: badges
@@ -313,7 +332,7 @@ public struct AntigravityUsage: Equatable, Sendable {
             let description = group["description"] as? String
             let rawBuckets = (group["buckets"] as? [[String: Any]]) ?? []
 
-            let parsedBuckets: [(order: Int, quota: ModelQuota)] = rawBuckets.enumerated().compactMap { bIndex, entry in
+            let parsedBuckets: [(order: Int, quota: ModelQuota)] = rawBuckets.enumerated().map { bIndex, entry in
                 let bucketID = (entry["id"] as? String) ?? "\(id)-\(bIndex)"
                 let rawWindow = (entry["window"] as? String)?.lowercased()
                 let rawName = (entry["name"] as? String) ?? (entry["display_name"] as? String)
@@ -322,20 +341,20 @@ public struct AntigravityUsage: Equatable, Sendable {
                 let resetsAt = parseResetDate(from: entry, now: now)
                 // Proto3 JSON can omit `remaining_fraction: 0.0` when exhausted;
                 // preserve the bucket as 0% when a reset timestamp is reported.
-                if remaining == nil && !disabled && resetsAt != nil {
+                if remaining == nil && !disabled && resetsAt != nil && !hasBalanceField(entry) {
                     remaining = 0
                 }
-
-                guard remaining != nil || disabled else { return nil }
 
                 let (title, order) = normalizeWindowTitle(window: rawWindow, fallbackName: rawName ?? bucketID)
                 let quota = ModelQuota(
                     id: bucketID,
                     title: title,
                     tag: nil,
-                    remainingPercent: remaining,
+                    remainingPercent: remaining.map(JSONParsing.clampedPercent),
                     resetsAt: resetsAt,
-                    isDisabled: disabled
+                    isDisabled: disabled,
+                    windowName: rawWindow,
+                    exhausted: remaining.map { $0 <= 0 }
                 )
                 return (order, quota)
             }
@@ -380,18 +399,16 @@ public struct AntigravityUsage: Equatable, Sendable {
             guard let entry = map[key] as? [String: Any] else { return nil }
             let (title, tag) = normalizeBucketKey(key)
             let disabled = (entry["disabled"] as? Bool) ?? false
-            var remaining = parseRemainingPercent(from: entry)
+            let remaining = parseRemainingPercent(from: entry)
             let resetsAt = parseResetDate(from: entry, now: now)
-            if remaining == nil && !disabled && resetsAt != nil {
-                remaining = 0
-            }
             return ModelQuota(
                 id: key,
                 title: (entry["display_name"] as? String) ?? (entry["label"] as? String) ?? title,
                 tag: (entry["window"] as? String) ?? tag,
-                remainingPercent: remaining,
+                remainingPercent: remaining.map(JSONParsing.clampedPercent),
                 resetsAt: resetsAt,
-                isDisabled: disabled
+                isDisabled: disabled,
+                exhausted: remaining.map { $0 <= 0 }
             )
         }
     }
@@ -422,11 +439,8 @@ public struct AntigravityUsage: Equatable, Sendable {
                 ?? normalizeBucketKey(rawID).1
 
             let disabled = (entry["disabled"] as? Bool) ?? (quotaObj["disabled"] as? Bool) ?? false
-            var remaining = parseRemainingPercent(from: quotaObj) ?? parseRemainingPercent(from: entry)
+            let remaining = parseRemainingPercent(from: quotaObj) ?? parseRemainingPercent(from: entry)
             let resetsAt = parseResetDate(from: quotaObj, now: now) ?? parseResetDate(from: entry, now: now)
-            if remaining == nil && !disabled && resetsAt != nil {
-                remaining = 0
-            }
 
             guard remaining != nil || disabled else { return nil }
 
@@ -434,22 +448,28 @@ public struct AntigravityUsage: Equatable, Sendable {
                 id: rawID,
                 title: title,
                 tag: tag,
-                remainingPercent: remaining,
+                remainingPercent: remaining.map(JSONParsing.clampedPercent),
                 resetsAt: resetsAt,
-                isDisabled: disabled
+                isDisabled: disabled,
+                exhausted: remaining.map { $0 <= 0 }
             )
         }
     }
 
-    private static func parseRemainingPercent(from dict: [String: Any]) -> Int? {
+    private static func hasBalanceField(_ entry: [String: Any]) -> Bool {
+        ["remaining_fraction", "remainingFraction", "remaining_percent", "remainingPercent", "used_percent", "usedPercent"]
+            .contains { entry[$0] != nil }
+    }
+
+    private static func parseRemainingPercent(from dict: [String: Any]) -> Double? {
         if let fraction = JSONParsing.doubleValue(dict["remaining_fraction"] ?? dict["remainingFraction"]) {
-            return JSONParsing.percentFromFraction(fraction)
+            return (0...1).contains(fraction) ? fraction * 100 : fraction
         }
         if let remaining = JSONParsing.doubleValue(dict["remaining_percent"] ?? dict["remainingPercent"]) {
-            return JSONParsing.clampedPercent(remaining)
+            return remaining
         }
         if let used = JSONParsing.doubleValue(dict["used_percent"] ?? dict["usedPercent"]) {
-            return JSONParsing.clampedPercent(100.0 - used)
+            return 100 - used
         }
         return nil
     }

@@ -20,7 +20,13 @@ import Combine
     }
 
     public var menuBarValue: String {
-        snapshot?.remainingPercent.map { "\($0)%" } ?? "—"
+        guard let headline = snapshot?.headline, headline.remainingPercent != nil else { return "—" }
+        return headline.valueDisplay
+    }
+
+    public var quotaDescription: String {
+        guard let headline = snapshot?.headline else { return "Usage unavailable" }
+        return "\(headline.title) · \(headline.valueDisplay)"
     }
 
     public var title: String {

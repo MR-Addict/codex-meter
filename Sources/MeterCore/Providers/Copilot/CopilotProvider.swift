@@ -13,6 +13,7 @@ public extension ServiceDescriptor {
         docsURL: URL(string: "https://cli.github.com")!,
         loginCommand: "gh auth login",
         executableName: "gh",
+        headlinePolicy: .allowances(finite: ["ai_credits", "premium_interactions"], fallback: "chat"),
         requirementLabel: "GitHub CLI (gh)"
     )
 }

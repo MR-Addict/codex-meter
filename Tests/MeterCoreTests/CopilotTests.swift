@@ -96,7 +96,7 @@ struct CopilotUsageTests {
         #expect(snapshot.badges.map(\.text) == ["Unlimited Completions"])
     }
 
-    @Test func decodesFreeLimitedUserQuotasAndSelectsLowestForHeadline() throws {
+    @Test func decodesFreeLimitedUserQuotasAndSelectsChatForHeadline() throws {
         let json = """
         {
           "copilot_plan": "free",
@@ -120,7 +120,7 @@ struct CopilotUsageTests {
         let snapshot = parsed.toSnapshot(fetchedAt: origin)
         #expect(snapshot.accountSubtitle == "Copilot Free")
         #expect(snapshot.planName == "Free")
-        #expect(snapshot.headline?.title == "Lowest quota")
+        #expect(snapshot.headline?.title == "Chat")
         #expect(snapshot.headline?.remainingPercent == 30)
         #expect(snapshot.sections[0].items.map(\.title) == ["Chat", "Completions"])
         #expect(snapshot.sections[0].items.map(\.tag) == ["15 / 50", "1800 / 2000"])
@@ -169,14 +169,14 @@ struct CopilotUsageTests {
         let parsed = try CopilotUsage.decode(Data(json.utf8), now: origin)
         #expect(parsed.planLabel == "Copilot Free")
         #expect(parsed.finiteBuckets.map(\.id) == ["chat", "completions"])
-        #expect(parsed.headlineBucket?.id == "completions")
-        #expect(parsed.headlineBucket?.remainingPercent == 17)
+        #expect(parsed.headlineBucket?.id == "chat")
+        #expect(parsed.headlineBucket?.remainingPercent == 99)
 
         let snapshot = parsed.toSnapshot(fetchedAt: origin)
         #expect(snapshot.accountSubtitle == "Copilot Free")
         #expect(snapshot.planName == "Free")
-        #expect(snapshot.headline?.title == "Lowest quota")
-        #expect(snapshot.headline?.remainingPercent == 17)
+        #expect(snapshot.headline?.title == "Chat")
+        #expect(snapshot.headline?.remainingPercent == 99)
         #expect(snapshot.sections[0].items.map(\.title) == ["Chat", "Completions"])
         #expect(snapshot.sections[0].items.map(\.tag) == ["199 / 200", "355 / 2000"])
         #expect(snapshot.sections[0].items.map(\.remainingPercent) == [99, 17])

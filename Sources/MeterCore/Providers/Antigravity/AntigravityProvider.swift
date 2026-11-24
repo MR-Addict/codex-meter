@@ -13,6 +13,7 @@ public extension ServiceDescriptor {
         docsURL: URL(string: "https://antigravity.google/docs/cli/reference")!,
         loginCommand: "agy",
         executableName: "agy",
+        headlinePolicy: .windows(preferredGroup: "gemini"),
         requirementLabel: "Antigravity CLI (agy)"
     )
 }

@@ -64,19 +64,25 @@ public struct CopilotUsage: Equatable, Sendable {
         buckets.filter(\.unlimited)
     }
 
-    /// Primary headline bucket powering the menu bar readout and popover hero ring.
-    /// Priority: `ai_credits` -> `premium_interactions` -> lowest remaining finite bucket.
+    private var headlineCandidates: [HeadlineCandidate] {
+        buckets.map { bucket in
+            let reset = bucket.resetsAt ?? resetsAt
+            let item = QuotaItem(
+                id: "copilot-\(bucket.id)",
+                title: bucket.title,
+                tag: bucket.countTag,
+                remainingPercent: bucket.unlimited ? nil : bucket.remainingPercent,
+                valueDisplay: bucket.unlimited ? "Unlimited" : nil,
+                resetPolicy: bucket.unlimited ? .none : (reset.map { .at($0) } ?? .none)
+            )
+            return HeadlineCandidate(item: item, sectionID: bucket.unlimited ? "copilot-included" : "copilot-monthly",
+                                     allowance: bucket.id, unlimited: bucket.unlimited)
+        }
+    }
+
     public var headlineBucket: QuotaBucket? {
-        let finite = finiteBuckets
-        if let credits = finite.first(where: { $0.id == "ai_credits" && $0.remainingPercent != nil }) {
-            return credits
-        }
-        if let premium = finite.first(where: { $0.id == "premium_interactions" && $0.remainingPercent != nil }) {
-            return premium
-        }
-        return finite
-            .filter { $0.remainingPercent != nil }
-            .min { ($0.remainingPercent ?? Int.max) < ($1.remainingPercent ?? Int.max) }
+        let selected = ServiceDescriptor.copilot.headlinePolicy.select(headlineCandidates)
+        return buckets.first { $0.id == selected?.allowance }
     }
 
     public var nearestResetAt: Date? {
@@ -102,49 +108,13 @@ public struct CopilotUsage: Equatable, Sendable {
     public func toSnapshot(fetchedAt: Date = Date()) -> UsageSnapshot {
         let finite = finiteBuckets
         let unlimited = unlimitedBuckets
-        let resetDate = nearestResetAt
-
-        let headline: HeadlineMetric
-        if let primary = headlineBucket {
-            let title: String
-            if primary.id == "ai_credits" || primary.id == "premium_interactions" || finite.count == 1 {
-                title = primary.title
-            } else {
-                title = "Lowest quota"
-            }
-            headline = HeadlineMetric(
-                title: title,
-                remainingPercent: primary.remainingPercent,
-                nearestResetAt: primary.resetsAt ?? resetDate
-            )
-        } else if !unlimited.isEmpty {
-            headline = HeadlineMetric(
-                title: "Copilot quota",
-                remainingPercent: 100,
-                valueDisplay: "Unlimited",
-                nearestResetAt: resetDate,
-                subtitle: resetDate == nil ? "Unlimited plan" : nil
-            )
-        } else {
-            headline = HeadlineMetric(
-                title: "Copilot quota",
-                remainingPercent: nil,
-                nearestResetAt: resetDate
-            )
-        }
+        let candidates = headlineCandidates
+        let selected = ServiceDescriptor.copilot.headlinePolicy.select(candidates)
+        let headline = selected?.metric ?? .unavailable
 
         var sections: [QuotaSection] = []
         if !finite.isEmpty {
-            let items = finite.map { bucket in
-                let bucketReset = bucket.resetsAt ?? resetsAt
-                return QuotaItem(
-                    id: "copilot-\(bucket.id)",
-                    title: bucket.title,
-                    tag: bucket.countTag,
-                    remainingPercent: bucket.remainingPercent,
-                    resetPolicy: bucketReset.map { .at($0) } ?? .none
-                )
-            }
+            let items = candidates.filter { !$0.unlimited }.map(\.item)
             sections.append(
                 QuotaSection(
                     id: "copilot-monthly",
@@ -154,16 +124,10 @@ public struct CopilotUsage: Equatable, Sendable {
                     isExpandedByDefault: true
                 )
             )
-        } else if !unlimited.isEmpty {
-            let items = unlimited.map { bucket in
-                QuotaItem(
-                    id: "copilot-\(bucket.id)",
-                    title: bucket.title,
-                    remainingPercent: nil,
-                    valueDisplay: "Unlimited",
-                    resetPolicy: .none
-                )
-            }
+        }
+        let showIncluded = !unlimited.isEmpty && (finite.isEmpty || selected?.unlimited == true)
+        if showIncluded {
+            let items = candidates.filter(\.unlimited).map(\.item)
             sections.append(
                 QuotaSection(
                     id: "copilot-included",
@@ -173,7 +137,7 @@ public struct CopilotUsage: Equatable, Sendable {
                     isExpandedByDefault: true
                 )
             )
-        } else {
+        } else if sections.isEmpty {
             sections.append(
                 QuotaSection(
                     id: "copilot-empty",
@@ -187,7 +151,7 @@ public struct CopilotUsage: Equatable, Sendable {
         }
 
         var badges: [UsageBadge] = []
-        if !finite.isEmpty && !unlimited.isEmpty {
+        if !showIncluded && !unlimited.isEmpty {
             let names = unlimited.map(\.title)
             let summary = names.count <= 2
                 ? names.joined(separator: " & ")
@@ -210,7 +174,7 @@ public struct CopilotUsage: Equatable, Sendable {
                     text: "Overage \(Self.formatNumber(totalOverage))"
                 )
             )
-        } else if let primary = headlineBucket, primary.overagePermitted, (primary.remainingPercent ?? 100) <= 20 {
+        } else if let primary = buckets.first(where: { $0.id == selected?.allowance }), primary.overagePermitted, (primary.remainingPercent ?? 100) <= 20 {
             badges.append(
                 UsageBadge(
                     id: "copilot-overage-enabled",
@@ -341,10 +305,8 @@ public struct CopilotUsage: Equatable, Sendable {
 
         // Skip buckets explicitly marked as ungranted on the user's plan (e.g., `premium_interactions`
         // with `has_quota: false, entitlement: 0` on Copilot Free).
+        if hasQuota == false { return nil }
         if !unlimited {
-            if hasQuota == false {
-                return nil
-            }
             if let entitlement, entitlement <= 0, (overageCount ?? 0) <= 0, hasQuota != true {
                 return nil
             }

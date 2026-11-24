@@ -13,6 +13,7 @@ public extension ServiceDescriptor {
         docsURL: URL(string: "https://developers.openai.com/codex/cli")!,
         loginCommand: "codex login",
         executableName: "codex",
+        headlinePolicy: .windows(preferredGroup: "codex-core"),
         requirementLabel: "Codex CLI"
     )
 }

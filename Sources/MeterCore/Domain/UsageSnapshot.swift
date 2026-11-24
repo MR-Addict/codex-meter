@@ -71,6 +71,10 @@ public struct HeadlineMetric: Equatable, Sendable {
     public let remainingPercent: Int?
     public let valueDisplay: String
     public let nearestResetAt: Date?
+    public let sectionID: String?
+    public let itemID: String?
+    static let unavailable = HeadlineMetric(title: "Primary quota", remainingPercent: nil)
+
     public let subtitle: String?
 
     public init(
@@ -78,13 +82,17 @@ public struct HeadlineMetric: Equatable, Sendable {
         remainingPercent: Int?,
         valueDisplay: String? = nil,
         nearestResetAt: Date? = nil,
-        subtitle: String? = nil
+        subtitle: String? = nil,
+        sectionID: String? = nil,
+        itemID: String? = nil
     ) {
         let clamped = remainingPercent.map { max(0, min(100, $0)) }
         self.title = title
         self.remainingPercent = clamped
         self.valueDisplay = valueDisplay ?? clamped.map { "\($0)%" } ?? "Unavailable"
         self.nearestResetAt = nearestResetAt
+        self.sectionID = sectionID
+        self.itemID = itemID
         self.subtitle = subtitle
     }
 
@@ -212,17 +220,9 @@ public struct UsageSnapshot: Equatable, Sendable {
 
     public var remainingPercent: Int? { headline?.remainingPercent }
 
-    public var nearestResetAt: Date? {
-        if let explicit = headline?.nearestResetAt { return explicit }
-        return sections
-            .flatMap(\.items)
-            .filter { !$0.isDisabled }
-            .compactMap { $0.resetPolicy.date }
-            .min()
-    }
+    public var nearestResetAt: Date? { headline?.nearestResetAt }
 
     public func resetSummary(now: Date = Date()) -> String? {
         headline?.detailText(now: now)
-            ?? nearestResetAt.map { ResetFormatter.format(resetsAt: $0, now: now) }
     }
 }
