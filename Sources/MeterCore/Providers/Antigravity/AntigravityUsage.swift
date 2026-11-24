@@ -110,31 +110,7 @@ public struct AntigravityUsage: Equatable, Sendable {
         activeModels.compactMap(\.resetsAt).min()
     }
 
-    /// Concise subscription tier label (`"Free"`, `"Pro"`, `"Ultra"`, etc.).
-    /// Prefers explicit plan metadata when provided by `agy` / `statusLine` JSON;
-    /// otherwise uses high-confidence structural signals from `/usage` groups.
-    public var planName: String? {
-        if let explicit = Self.normalizePlanName(planLabel) {
-            return explicit
-        }
-
-        // High-confidence Pro signal: dedicated paid Pro Argon quota description.
-        if groups.contains(where: { ($0.description ?? "").lowercased().contains("for paid pro plans") }) {
-            return "Pro"
-        }
-
-        // High-confidence Free signal: active window-based buckets exist, all are weekly-only (no 5-hour window).
-        let active = activeModels
-        if !active.isEmpty {
-            let hasWeekly = active.contains { $0.window == .weekly }
-            let hasFiveHour = active.contains { $0.window == .fiveHour }
-            if hasWeekly && !hasFiveHour {
-                return "Free"
-            }
-        }
-
-        return nil
-    }
+    public var planName: String? { Self.normalizePlanName(planLabel) }
 
     public static func normalizePlanName(_ raw: String?) -> String? {
         guard let raw else { return nil }
@@ -162,7 +138,7 @@ public struct AntigravityUsage: Equatable, Sendable {
         }
     }
 
-    public func toSnapshot(fetchedAt: Date = Date()) -> UsageSnapshot {
+    public func toSnapshot(fetchedAt: Date = Date(), statusLinePlan: String? = nil) -> UsageSnapshot {
         let grouped = groups.map { group in
             let sectionID = "agy-group-\(group.id)"
             let isGemini = [group.id, group.name].contains {
@@ -216,8 +192,8 @@ public struct AntigravityUsage: Equatable, Sendable {
         return UsageSnapshot(
             serviceID: .antigravity,
             fetchedAt: fetchedAt,
-            accountSubtitle: planLabel,
-            planName: planName,
+            accountSubtitle: planLabel ?? statusLinePlan,
+            planName: planName ?? Self.normalizePlanName(statusLinePlan),
             headline: selected?.metric ?? HeadlineMetric.unavailable,
             sections: sections,
             collapsibleSectionTitle: "Other models",
@@ -489,7 +465,7 @@ public struct AntigravityUsage: Equatable, Sendable {
     }
 
     private static func extractPlanLabel(from dict: [String: Any]) -> String? {
-        for key in ["plan_name", "planName", "plan", "tier"] {
+        for key in ["plan_tier", "plan_name", "planName", "plan", "tier"] {
             if let value = dict[key] as? String, !value.isEmpty {
                 return value
             }

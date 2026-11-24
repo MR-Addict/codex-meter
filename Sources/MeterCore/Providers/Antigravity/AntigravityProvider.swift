@@ -39,6 +39,8 @@ public extension ServiceDescriptor {
     private let locateExecutable: @MainActor () -> String?
     private let locateStatusFile: @MainActor () -> String?
     private let readStatusFile: (String) throws -> Data
+    private let readPlan: @Sendable (String) async throws -> String?
+    private var planTask: Task<String?, Error>?
     private let session: CommandSession
     private let now: () -> Date
 
@@ -47,6 +49,7 @@ public extension ServiceDescriptor {
         locateExecutable: (@MainActor () -> String?)? = nil,
         locateStatusFile: (@MainActor () -> String?)? = nil,
         readStatusFile: ((String) throws -> Data)? = nil,
+        readPlan: (@Sendable (String) async throws -> String?)? = nil,
         runner: any CommandRunning = ProcessCommandRunner(),
         timeout: TimeInterval = 20,
         now: @escaping () -> Date = Date.init
@@ -76,6 +79,7 @@ public extension ServiceDescriptor {
         self.readStatusFile = readStatusFile ?? { path in
             try Data(contentsOf: URL(fileURLWithPath: path))
         }
+        self.readPlan = readPlan ?? { try await AntigravityPlanReader.read(executable: $0) }
         self.session = CommandSession(runner: runner, timeout: timeout)
         self.now = now
     }
@@ -101,7 +105,8 @@ public extension ServiceDescriptor {
                 )
                 if output.exitCode == 0 {
                     let parsed = try AntigravityUsage.decode(output.stdout, now: now())
-                    return parsed.toSnapshot(fetchedAt: now())
+                    let tier = parsed.planName == nil ? try await fetchPlan(executable: executable) : nil
+                    return parsed.toSnapshot(fetchedAt: now(), statusLinePlan: tier)
                 }
                 let combined = (output.stderrString + "\n" + output.stdoutString).lowercased()
                 if isAuthFailure(combined) {
@@ -140,6 +145,7 @@ public extension ServiceDescriptor {
     }
 
     public func shutdown() {
+        planTask?.cancel()
         session.cancel()
     }
 
@@ -148,6 +154,27 @@ public extension ServiceDescriptor {
     }
 
     // MARK: - Helpers
+
+    private func fetchPlan(executable: String) async throws -> String? {
+        try Task.checkCancellation()
+        planTask?.cancel()
+        let readPlan = self.readPlan
+        let task = Task { try await readPlan(executable) }
+        planTask = task
+        defer { if planTask == task { planTask = nil } }
+        return try await withTaskCancellationHandler {
+            do {
+                return try await task.value
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Quota is still usable when this CLI version cannot report an account tier.
+                return nil
+            }
+        } onCancel: {
+            task.cancel()
+        }
+    }
 
     private func readStatusFileSnapshot() throws -> UsageSnapshot? {
         guard let statusFile = locateStatusFile() else { return nil }

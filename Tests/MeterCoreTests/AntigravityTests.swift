@@ -186,8 +186,8 @@ struct AntigravityUsageTests {
         #expect(parsed.nearestResetAt != nil)
     }
 
-    @Test func decodesFreeWeeklyOnlyAndProto3ZeroExhaustedBucketAndProInference() throws {
-        // 1. Antigravity Free tier: weekly-only buckets, plus an exhausted bucket where proto3 omits remaining_fraction: 0.0
+    @Test func decodesProto3ZeroWithoutInferringPlanFromWindowsOrGroupDescriptions() throws {
+        // Weekly-only quotas can omit remaining_fraction when exhausted.
         let freeJSON = """
         {
           "command": {
@@ -223,15 +223,15 @@ struct AntigravityUsageTests {
         }
         """
         let freeParsed = try AntigravityUsage.decode(Data(freeJSON.utf8), now: origin)
-        #expect(freeParsed.planName == "Free")
+        #expect(freeParsed.planName == nil)
         #expect(freeParsed.lowestRemaining == 0)
         let freeSnapshot = freeParsed.toSnapshot(fetchedAt: origin)
-        #expect(freeSnapshot.planName == "Free")
+        #expect(freeSnapshot.planName == nil)
         #expect(freeSnapshot.headline?.remainingPercent == 0)
         #expect(freeSnapshot.sections[0].title == "Gemini Models")
         #expect(freeSnapshot.sections[0].items.map(\.remainingPercent) == [0])
 
-        // 2. Paid Pro tier inferred from live Argon Pro description when no explicit plan_name is emitted
+        // A description mentioning Pro and Ultra describes the model group, not this account.
         let proJSON = """
         {
           "command": {
@@ -258,7 +258,7 @@ struct AntigravityUsageTests {
         }
         """
         let proSnapshot = try AntigravityUsage.decode(Data(proJSON.utf8), now: origin).toSnapshot(fetchedAt: origin)
-        #expect(proSnapshot.planName == "Pro")
+        #expect(proSnapshot.planName == nil)
     }
 
     @Test func rejectsUnrecognizedOrMalformedPayloads() {
@@ -286,12 +286,41 @@ struct AntigravityProviderTests {
         let provider = AntigravityProvider(
             locateExecutable: { "/opt/homebrew/bin/agy" },
             locateStatusFile: { nil },
+            readPlan: { _ in "Google AI Pro" },
             runner: runner
         )
         #expect(provider.detect() == .detected(source: "/opt/homebrew/bin/agy"))
         let snapshot = try await provider.fetchUsage()
         #expect(snapshot.serviceID == .antigravity)
         #expect(snapshot.remainingPercent == 80)
+        #expect(snapshot.planName == "Pro")
+    }
+
+    @Test @MainActor func explicitUsageTierSkipsSupplementalLookup() async throws {
+        let runner = StubCommandRunner { _, _ in
+            CommandOutput(exitCode: 0, stdout: Data(#"{"plan_tier":"Google AI Ultra","quota":{}}"#.utf8))
+        }
+        let provider = AntigravityProvider(
+            locateExecutable: { "/agy" },
+            readPlan: { _ in Issue.record("Unexpected plan lookup"); return nil },
+            runner: runner
+        )
+        let snapshot = try await provider.fetchUsage()
+        #expect(snapshot.planName == "Ultra")
+    }
+
+    @Test @MainActor func missingTierPreservesWeeklyQuota() async throws {
+        let runner = StubCommandRunner { _, _ in
+            CommandOutput(exitCode: 0, stdout: Data(#"{"quota":{"gemini-weekly":{"remaining_fraction":0.64}}}"#.utf8))
+        }
+        let provider = AntigravityProvider(
+            locateExecutable: { "/agy" },
+            readPlan: { _ in throw CommandRunnerError.timedOut },
+            runner: runner
+        )
+        let snapshot = try await provider.fetchUsage()
+        #expect(snapshot.planName == nil)
+        #expect(snapshot.remainingPercent == 64)
     }
 
     @Test @MainActor func mapsAuthFailureToAuthCategory() async {
@@ -314,7 +343,7 @@ struct AntigravityProviderTests {
     }
 
     @Test @MainActor func fallsBackToStatusFileWhenCLIAbsentOrUnsupported() async throws {
-        let statusJSON = Data(#"{"models":[{"id":"gemini-pro","display_name":"Gemini Pro","remaining_fraction":0.64}]}"#.utf8)
+        let statusJSON = Data(#"{"plan_tier":"Google AI Ultra","models":[{"id":"gemini-pro","display_name":"Gemini Pro","remaining_fraction":0.64}]}"#.utf8)
         let providerNoCLI = AntigravityProvider(
             locateExecutable: { nil },
             locateStatusFile: { "/tmp/agy-status.json" },
@@ -323,6 +352,7 @@ struct AntigravityProviderTests {
         #expect(providerNoCLI.detect() == .detected(source: "/tmp/agy-status.json"))
         let snapshot1 = try await providerNoCLI.fetchUsage()
         #expect(snapshot1.remainingPercent == 64)
+        #expect(snapshot1.planName == "Ultra")
 
         let unsupportedRunner = StubCommandRunner { _, _ in
             CommandOutput(exitCode: 2, stdout: Data(), stderr: Data("unknown flag: --print".utf8))
@@ -335,6 +365,7 @@ struct AntigravityProviderTests {
         )
         let snapshot2 = try await providerFallback.fetchUsage()
         #expect(snapshot2.remainingPercent == 64)
+        #expect(snapshot2.planName == "Ultra")
     }
 
     @Test @MainActor func mapsTimeoutAndMissingExecutable() async {
@@ -392,5 +423,8 @@ struct AntigravityProviderTests {
         let allHaveItems = snapshot.sections.allSatisfy { !$0.items.isEmpty }
         #expect(allHaveItems)
         #expect(snapshot.remainingPercent != nil)
+        if let expected = ProcessInfo.processInfo.environment["ANTIGRAVITY_METER_EXPECTED_PLAN"] {
+            #expect(snapshot.planName == expected)
+        }
     }
 }
